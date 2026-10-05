@@ -4,14 +4,26 @@
 @using BlazorSkiaSharp.Graphs
 @implements IAsyncDisposable
 
-<div class="graph-minimap" @ref="_surface" style="width: @(Width)px; height: @(Height)px;">
-    <SKCanvasView @ref="_canvas"
-                  OnPaintSurface="OnPaintSurface"
-                  IgnorePixelScaling="true"
-                  role="img"
-                  aria-label="Graph minimap, drag to move the viewport"
-                  style="width:100%;height:100%;display:block;touch-action:none;cursor:crosshair" />
-</div>
+@if (Expanded)
+{
+    <div class="graph-minimap @CornerClass">
+        <div class="graph-minimap__surface"
+             @ref="_surface"
+             tabindex="0"
+             role="application"
+             aria-label="Graph minimap. Arrow keys to pan the view, plus and minus to zoom, drag to move the view, wheel to zoom."
+             style="width: @(Width)px; height: @(Height)px;">
+            <SKCanvasView @ref="_canvas"
+                          OnPaintSurface="OnPaintSurface"
+                          IgnorePixelScaling="true"
+                          role="img"
+                          aria-label="Overview of the graph, with the current viewport highlighted"
+                          style="width:100%;height:100%;display:block;touch-action:none;cursor:crosshair" />
+
+            <div class="graph-minimap__grip @GripClass" title="Drag to resize" aria-hidden="true"></div>
+        </div>
+    </div>
+}
 
 @code {
     private static readonly SKColor Backdrop = new(0x1E, 0x24, 0x30, 0xF0);
@@ -19,6 +31,13 @@
     private static readonly SKColor ViewportFill = new(0x38, 0xBD, 0xF8, 0x1F);
     private static readonly SKColor ViewportStroke = new(0x38, 0xBD, 0xF8, 0xE6);
     private const float ContentPadding = 7f;
+
+    /// <summary>Size of the resize grip, and the extra slack when hit testing it.</summary>
+    private const float GripSize = 16f;
+
+    private const float GripTouchTolerance = 6f;
+    private const float KeyPanStep = 48f;
+    private const float KeyZoomStep = 1.25f;
 
     // Reused between frames; a paint per frame would be pure churn at 60fps.
     private readonly SKPaint _nodePaint = new() { IsAntialias = true, Style = SKPaintStyle.Fill };
@@ -30,7 +49,13 @@
     private GraphSurfaceInput? _input;
     private GraphViewport? _subscribed;
     private bool _disposed;
-    private bool _dragging;
+
+    private bool _draggingViewport;
+    private bool _resizing;
+
+    /// <summary>Screen position of the anchored corner, kept fixed while resizing.</summary>
+    private float _resizeAnchorX;
+    private float _resizeAnchorY;
 
     /// <summary>Inner rectangle of the minimap, everything is mapped into it.</summary>
     private SKRect _content;
@@ -60,8 +85,45 @@
     [Parameter]
     public int Width { get; set; } = 260;
 
+    /// <summary>Height of the minimap, in CSS pixels.</summary>
     [Parameter]
     public int Height { get; set; } = 170;
+
+    /// <summary>The corner of the stage the minimap is anchored to.</summary>
+    [Parameter]
+    public MinimapCorner Corner { get; set; } = MinimapCorner.BottomRight;
+
+    /// <summary>Whether the minimap is shown at all.</summary>
+    [Parameter]
+    public bool Expanded { get; set; } = true;
+
+    /// <summary>Raised while the user drags the resize grip.</summary>
+    [Parameter]
+    public EventCallback<SKSize> SizeChanged { get; set; }
+
+    /// <summary>
+    /// Raised once the resize gesture ends. Separate from <see cref="SizeChanged"/> so the
+    /// owner can update its state on every move but only persist when the drag is over.
+    /// </summary>
+    [Parameter]
+    public EventCallback ResizeEnded { get; set; }
+
+    private string CornerClass => Corner switch
+    {
+        MinimapCorner.TopLeft => "graph-minimap--top-left",
+        MinimapCorner.TopRight => "graph-minimap--top-right",
+        MinimapCorner.BottomLeft => "graph-minimap--bottom-left",
+        _ => "graph-minimap--bottom-right",
+    };
+
+    /// <summary>The grip sits diagonally opposite the anchored corner, and resizes it.</summary>
+    private string GripClass => Corner switch
+    {
+        MinimapCorner.TopLeft => "graph-minimap__grip--bottom-right",
+        MinimapCorner.TopRight => "graph-minimap__grip--bottom-left",
+        MinimapCorner.BottomLeft => "graph-minimap__grip--top-right",
+        _ => "graph-minimap__grip--top-left",
+    };
 
     [Inject]
     private IJSRuntime JS { get; set; } = default!;
@@ -82,9 +144,19 @@
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
-        if (!firstRender)
+        if (_disposed)
             return;
 
+        // Collapsing removes the element the listeners live on, expanding brings back a
+        // new one, so the input has to follow the markup rather than attach once.
+        if (Expanded && _input is null)
+            await AttachAsync();
+        else if (!Expanded && _input is not null)
+            await DetachAsync();
+    }
+
+    private async Task AttachAsync()
+    {
         _input = new GraphSurfaceInput(JS, _surface);
 
         // stopPropagation: the minimap is nested inside the main canvas surface, and both
@@ -93,15 +165,35 @@
         _input.PointerMoved += OnPointerMoved;
         _input.PointerReleased += OnPointerReleased;
         _input.Wheel += OnWheel;
+        _input.KeyPressed += OnKeyPressed;
 
         try
         {
-            await _input.AttachAsync(focusable: false, stopPropagation: true);
+            // focusable: the surface is focusable so it can be reached with the keyboard,
+            // and pointer down on it moves focus there so the keys work straight away.
+            await _input.AttachAsync(focusable: true, stopPropagation: true);
         }
         catch (JSException)
         {
             // JavaScript is not available: the minimap stays a read only overview.
         }
+    }
+
+    private async Task DetachAsync()
+    {
+        if (_input is null)
+            return;
+
+        _input.PointerPressed -= OnPointerPressed;
+        _input.PointerMoved -= OnPointerMoved;
+        _input.PointerReleased -= OnPointerReleased;
+        _input.Wheel -= OnWheel;
+        _input.KeyPressed -= OnKeyPressed;
+        await _input.DisposeAsync();
+        _input = null;
+
+        _draggingViewport = false;
+        _resizing = false;
     }
 
     public async ValueTask DisposeAsync()
@@ -114,15 +206,7 @@
             _subscribed = null;
         }
 
-        if (_input is not null)
-        {
-            _input.PointerPressed -= OnPointerPressed;
-            _input.PointerMoved -= OnPointerMoved;
-            _input.PointerReleased -= OnPointerReleased;
-            _input.Wheel -= OnWheel;
-            await _input.DisposeAsync();
-            _input = null;
-        }
+        await DetachAsync();
 
         _picture?.Dispose();
         _picture = null;
@@ -132,6 +216,8 @@
     }
 
     private void OnViewportChanged() => _canvas?.Invalidate();
+
+    // -------------------------------------------------------------------- drawing
 
     private void OnPaintSurface(SKPaintSurfaceEventArgs e)
     {
@@ -303,13 +389,20 @@
             : SKRect.Empty;
     }
 
+    // ------------------------------------------------------------------ pointers
+
     private void OnPointerPressed(PointerSample sample)
     {
         if (_disposed)
             return;
 
-        _dragging = true;
-        CenterMainViewport(new SKPoint(sample.X, sample.Y));
+        if (IsOnGrip(sample.X, sample.Y))
+            BeginResize(sample);
+        else
+        {
+            _draggingViewport = true;
+            CenterMainViewport(new SKPoint(sample.X, sample.Y));
+        }
 
         _ = BeginDragAsync();
     }
@@ -323,29 +416,98 @@
         }
         catch (JSException)
         {
+            _draggingViewport = false;
+            _resizing = false;
         }
     }
 
     private void OnPointerMoved(PointerSample sample)
     {
-        if (_disposed || !_dragging)
+        if (_disposed)
             return;
 
-        CenterMainViewport(new SKPoint(sample.X, sample.Y));
+        if (_resizing)
+        {
+            UpdateResize(sample);
+            return;
+        }
+
+        if (_draggingViewport)
+            CenterMainViewport(new SKPoint(sample.X, sample.Y));
     }
 
     private void OnPointerReleased(long pointerId)
     {
-        _dragging = false;
+        var wasResizing = _resizing;
+
+        _draggingViewport = false;
+        _resizing = false;
+
+        if (wasResizing)
+            ResizeEnded.InvokeAsync();
     }
 
-    private void CenterMainViewport(SKPoint miniPosition)
+    private bool IsOnGrip(float x, float y)
     {
-        if (!Viewport.HasSurface)
+        var grip = GripRect();
+        var slack = GripTouchTolerance;
+
+        return x >= grip.Left - slack && x <= grip.Right + slack &&
+               y >= grip.Top - slack && y <= grip.Bottom + slack;
+    }
+
+    /// <summary>Grip rectangle, in surface coordinates, at the corner opposite the anchor.</summary>
+    private SKRect GripRect()
+    {
+        var w = Width;
+        var h = Height;
+
+        return Corner switch
+        {
+            MinimapCorner.TopLeft => new SKRect(w - GripSize, h - GripSize, w, h),
+            MinimapCorner.TopRight => new SKRect(0, h - GripSize, GripSize, h),
+            MinimapCorner.BottomLeft => new SKRect(w - GripSize, 0, w, GripSize),
+            _ => new SKRect(0, 0, GripSize, GripSize),
+        };
+    }
+
+    /// <summary>
+    /// Pins the anchored corner on screen. Everything else is measured from it, so the
+    /// minimap grows away from the corner it stays attached to.
+    /// </summary>
+    /// <remarks>
+    /// The surface box is derived from the sample rather than measured: the sample carries
+    /// both the client position and the offset inside the surface, so the box origin follows
+    /// from the surface size the component already knows.
+    /// </remarks>
+    private void BeginResize(PointerSample sample)
+    {
+        var left = sample.ClientX - sample.X;
+        var top = sample.ClientY - sample.Y;
+
+        (_resizeAnchorX, _resizeAnchorY) = Corner switch
+        {
+            MinimapCorner.TopLeft => (left, top),
+            MinimapCorner.TopRight => (left + Width, top),
+            MinimapCorner.BottomLeft => (left, top + Height),
+            _ => (left + Width, top + Height),
+        };
+
+        _resizing = true;
+    }
+
+    private void UpdateResize(PointerSample sample)
+    {
+        var width = Math.Clamp((int)MathF.Abs(sample.ClientX - _resizeAnchorX), MinimapSettings.MinWidth, MinimapSettings.MaxWidth);
+        var height = Math.Clamp((int)MathF.Abs(sample.ClientY - _resizeAnchorY), MinimapSettings.MinHeight, MinimapSettings.MaxHeight);
+
+        if (width == Width && height == Height)
             return;
 
-        Viewport.CenterOn(MiniToWorld(miniPosition));
+        SizeChanged.InvokeAsync(new SKSize(width, height));
     }
+
+    // -------------------------------------------------------------------- wheel
 
     private void OnWheel(WheelSample sample)
     {
@@ -354,5 +516,47 @@
 
         var world = MiniToWorld(new SKPoint(sample.X, sample.Y));
         Viewport.ZoomAroundWorld(world, ZoomMath.FactorFromWheel(sample.DeltaY, sample.DeltaMode, sample.CtrlKey));
+    }
+
+    // ---------------------------------------------------------------- keyboard
+
+    private void OnKeyPressed(string key)
+    {
+        if (!Viewport.HasSurface)
+            return;
+
+        switch (key)
+        {
+            case "ArrowLeft":
+                Viewport.PanByScreenDelta(KeyPanStep, 0f);
+                break;
+            case "ArrowRight":
+                Viewport.PanByScreenDelta(-KeyPanStep, 0f);
+                break;
+            case "ArrowUp":
+                Viewport.PanByScreenDelta(0f, KeyPanStep);
+                break;
+            case "ArrowDown":
+                Viewport.PanByScreenDelta(0f, -KeyPanStep);
+                break;
+            case "+":
+            case "=":
+                Viewport.ZoomAt(Viewport.SurfaceCenter, KeyZoomStep);
+                break;
+            case "-":
+            case "_":
+                Viewport.ZoomAt(Viewport.SurfaceCenter, 1f / KeyZoomStep);
+                break;
+            default:
+                return;
+        }
+    }
+
+    private void CenterMainViewport(SKPoint miniPosition)
+    {
+        if (!Viewport.HasSurface)
+            return;
+
+        Viewport.CenterOn(MiniToWorld(miniPosition));
     }
 }

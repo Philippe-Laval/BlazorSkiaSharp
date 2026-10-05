@@ -4,11 +4,13 @@ using SkiaSharp;
 
 namespace BlazorSkiaSharp.Graphs;
 
-/// <summary>Pointer position reported by the browser, relative to the tracked surface.</summary>
-/// <param name="X">Horizontal position.</param>
-/// <param name="Y">Vertical position.</param>
+/// <summary>Pointer position reported by the browser.</summary>
+/// <param name="X">Horizontal position, relative to the tracked surface.</param>
+/// <param name="Y">Vertical position, relative to the tracked surface.</param>
+/// <param name="ClientX">Horizontal position, relative to the browser viewport.</param>
+/// <param name="ClientY">Vertical position, relative to the browser viewport.</param>
 /// <param name="PointerId">Identifier of the pointer, so several fingers can be followed.</param>
-public readonly record struct PointerSample(float X, float Y, long PointerId);
+public readonly record struct PointerSample(float X, float Y, float ClientX, float ClientY, long PointerId);
 
 /// <summary>A wheel or trackpad scroll reported by the browser.</summary>
 /// <param name="X">Horizontal position, relative to the surface.</param>
@@ -89,12 +91,12 @@ public sealed class GraphSurfaceInput : IAsyncDisposable
     }
 
     [JSInvokable]
-    public void OnPointerDown(double x, double y, long pointerId)
-        => PointerPressed?.Invoke(new PointerSample((float)x, (float)y, pointerId));
+    public void OnPointerDown(double x, double y, double clientX, double clientY, long pointerId)
+        => PointerPressed?.Invoke(new PointerSample((float)x, (float)y, (float)clientX, (float)clientY, pointerId));
 
     [JSInvokable]
-    public void OnPointerMove(double x, double y, long pointerId)
-        => PointerMoved?.Invoke(new PointerSample((float)x, (float)y, pointerId));
+    public void OnPointerMove(double x, double y, double clientX, double clientY, long pointerId)
+        => PointerMoved?.Invoke(new PointerSample((float)x, (float)y, (float)clientX, (float)clientY, pointerId));
 
     [JSInvokable]
     public void OnPointerUp(long pointerId) => PointerReleased?.Invoke(pointerId);

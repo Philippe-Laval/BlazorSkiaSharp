@@ -11,9 +11,9 @@
 
 <p class="graph-hint">
     Drag to pan, use the mouse wheel or a trackpad pinch to zoom, pinch with two fingers on
-    touch devices &mdash; or use the minimap in the bottom right corner to jump around the
-    whole graph. Keyboard: <kbd>+</kbd>/<kbd>-</kbd> zoom, <kbd>0</kbd> reset,
-    <kbd>1</kbd> fit, arrow keys pan.
+    touch devices &mdash; or use the minimap in the corner to jump around the whole graph.
+    Keyboard: <kbd>+</kbd>/<kbd>-</kbd> zoom, <kbd>0</kbd> reset, <kbd>1</kbd> fit,
+    arrow keys pan.
 </p>
 
 <div class="graph-toolbar">
@@ -23,6 +23,27 @@
         <button type="button" class="btn btn-outline-secondary" title="Reset view (0)" @onclick="ResetView">Reset</button>
         <button type="button" class="btn btn-outline-secondary" title="Fit graph (1)" @onclick="FitToContent">Fit</button>
     </div>
+
+    <div class="btn-group btn-group-sm" role="group" aria-label="Minimap">
+        <button type="button"
+                class="btn btn-outline-secondary @(Minimap.Expanded ? "active" : null)"
+                aria-pressed="@(Minimap.Expanded ? "true" : "false")"
+                title="Show or hide the minimap"
+                @onclick="ToggleMinimap">
+            <span aria-hidden="true">&#9638;</span> Minimap
+        </button>
+    </div>
+
+    <label class="graph-toolbar__corner">
+        <span class="visually-hidden">Minimap corner</span>
+        <select class="form-select form-select-sm" @onchange="OnCornerChanged">
+            @foreach (var corner in Corners)
+            {
+                <option value="@corner" selected="@(corner == Minimap.Corner)">@CornerLabel(corner)</option>
+            }
+        </select>
+    </label>
+
     <span class="graph-toolbar__readout">Zoom @_zoomPercent</span>
     <span class="graph-toolbar__counts">@_graph.Nodes.Count nodes &#183; @_graph.Edges.Count edges</span>
 </div>
@@ -35,12 +56,14 @@
                   aria-label="Graph viewport. Drag to pan, use the mouse wheel to zoom."
                   style="width:100%;height:100%;display:block;touch-action:none;cursor:grab" />
 
-    <div class="graph-stage__minimap">
-        <MinimapView Graph="_graph"
-                     Viewport="_viewport"
-                     Width="260"
-                     Height="170" />
-    </div>
+    <MinimapView Graph="_graph"
+                 Viewport="_viewport"
+                 Width="Minimap.Width"
+                 Height="Minimap.Height"
+                 Corner="Minimap.Corner"
+                 Expanded="Minimap.Expanded"
+                 SizeChanged="OnMinimapSizeChanged"
+                 ResizeEnded="OnMinimapResizeEnded" />
 </div>
 
 @code {
@@ -50,6 +73,14 @@
     /// <summary>Zoom step of the toolbar buttons and the + / - keys.</summary>
     private const float ButtonZoomStep = 1.25f;
 
+    private static readonly MinimapCorner[] Corners =
+    [
+        MinimapCorner.TopLeft,
+        MinimapCorner.TopRight,
+        MinimapCorner.BottomLeft,
+        MinimapCorner.BottomRight,
+    ];
+
     private readonly GraphModel _graph = GraphModel.CreateDemo();
     private readonly GraphViewport _viewport = new();
     private readonly GraphRenderer _renderer = new();
@@ -58,6 +89,8 @@
     private SKCanvasView? _mainCanvas;
     private GraphSurfaceInput? _input;
     private ElementReference _stage;
+
+    private MinimapSettings Minimap { get; set; } = new();
 
     private bool _pendingInitialFit = true;
     private bool _viewAdjusted;
@@ -80,6 +113,9 @@
         // Keeps the graph reachable while dragging: the viewport will not let it be
         // panned further than the slack away from the surface.
         _viewport.Bounds = _graph.Bounds;
+
+        // Read straight away so the very first paint already uses the remembered layout.
+        Minimap = MinimapSettingsStore.Load(JS);
 
         _viewport.Changed += OnViewportChanged;
     }
@@ -376,6 +412,47 @@
     }
 
     // -------------------------------------------------------------------- helpers
+
+    private static string CornerLabel(MinimapCorner corner) => corner switch
+    {
+        MinimapCorner.TopLeft => "Top left",
+        MinimapCorner.TopRight => "Top right",
+        MinimapCorner.BottomLeft => "Bottom left",
+        _ => "Bottom right",
+    };
+
+    private void ToggleMinimap() => ApplyMinimap(Minimap with { Expanded = !Minimap.Expanded });
+
+    private void OnCornerChanged(ChangeEventArgs e)
+    {
+        if (Enum.TryParse<MinimapCorner>(e.Value?.ToString(), out var corner) && corner != Minimap.Corner)
+            ApplyMinimap(Minimap with { Corner = corner });
+    }
+
+    private void OnMinimapSizeChanged(SKSize size)
+    {
+        var width = (int)MathF.Round(size.Width);
+        var height = (int)MathF.Round(size.Height);
+
+        if (width == Minimap.Width && height == Minimap.Height)
+            return;
+
+        Minimap = Minimap with { Width = width, Height = height };
+        StateHasChanged();
+    }
+
+    /// <summary>
+    /// Persists the layout once the resize drag is over. Saving on every pointer move of
+    /// the drag would hammer local storage for no benefit.
+    /// </summary>
+    private void OnMinimapResizeEnded() => MinimapSettingsStore.Save(JS, Minimap);
+
+    private void ApplyMinimap(MinimapSettings settings)
+    {
+        Minimap = settings.Clamped();
+        MinimapSettingsStore.Save(JS, Minimap);
+        StateHasChanged();
+    }
 
     private void UpsertPointer(long pointerId, SKPoint position)
     {

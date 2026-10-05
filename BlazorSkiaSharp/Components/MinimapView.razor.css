@@ -1,8 +1,106 @@
 .graph-minimap {
+    position: absolute;
+    z-index: 2;
+}
+
+.graph-minimap--top-left {
+    left: 12px;
+    top: 12px;
+}
+
+.graph-minimap--top-right {
+    right: 12px;
+    top: 12px;
+}
+
+.graph-minimap--bottom-left {
+    bottom: 12px;
+    left: 12px;
+}
+
+.graph-minimap--bottom-right {
+    bottom: 12px;
+    right: 12px;
+}
+
+.graph-minimap__surface {
+    position: relative;
+
+    /* Keeps the canvas inside the rounded corners. */
     border-radius: 8px;
     overflow: hidden;
     line-height: 0;
     box-shadow: 0 6px 20px rgba(15, 23, 42, 0.45);
     outline: 1px solid rgba(15, 23, 42, 0.55);
     outline-offset: -1px;
+}
+
+.graph-minimap__surface:focus-visible {
+    outline: 2px solid #38bdf8;
+    outline-offset: 1px;
+}
+
+.graph-minimap__grip {
+    position: absolute;
+    width: 16px;
+    height: 16px;
+    touch-action: none;
+}
+
+/* Inset by 2px so the rounded corner does not clip the marker. */
+.graph-minimap__grip--top-left {
+    left: 2px;
+    top: 2px;
+    cursor: nwse-resize;
+}
+
+.graph-minimap__grip--top-right {
+    right: 2px;
+    top: 2px;
+    cursor: nesw-resize;
+}
+
+.graph-minimap__grip--bottom-left {
+    left: 2px;
+    bottom: 2px;
+    cursor: nesw-resize;
+}
+
+.graph-minimap__grip--bottom-right {
+    right: 2px;
+    bottom: 2px;
+    cursor: nwse-resize;
+}
+
+/* A small corner mark, drawn so it reads on the dark backdrop. */
+.graph-minimap__grip::after {
+    content: "";
+    position: absolute;
+    width: 7px;
+    height: 7px;
+    border-bottom: 2px solid rgba(226, 232, 240, 0.65);
+    border-left: 2px solid rgba(226, 232, 240, 0.65);
+}
+
+.graph-minimap__grip--top-left::after {
+    left: 2px;
+    top: 2px;
+    transform: rotate(180deg);
+}
+
+.graph-minimap__grip--top-right::after {
+    right: 2px;
+    top: 2px;
+    transform: rotate(90deg);
+}
+
+.graph-minimap__grip--bottom-left::after {
+    left: 2px;
+    bottom: 2px;
+    transform: rotate(-90deg);
+}
+
+.graph-minimap__grip--bottom-right::after {
+    right: 2px;
+    bottom: 2px;
 }

@@ -127,7 +127,7 @@ function onPointerDown(e) {
 
     const [x, y] = localPoint(surface.element, e);
 
-    surface.ref.invokeMethodAsync('OnPointerDown', x, y, e.pointerId);
+    surface.ref.invokeMethodAsync('OnPointerDown', x, y, e.clientX, e.clientY, e.pointerId);
 }
 
 function onPointerMove(e) {
@@ -141,7 +141,7 @@ function onPointerMove(e) {
 
     const [x, y] = localPoint(drag.element, e);
 
-    drag.ref.invokeMethodAsync('OnPointerMove', x, y, e.pointerId);
+    drag.ref.invokeMethodAsync('OnPointerMove', x, y, e.clientX, e.clientY, e.pointerId);
 }
 
 function onPointerUp(e) {

@@ -35,6 +35,14 @@
     font-size: 0.8125rem;
 }
 
+.graph-toolbar__corner {
+    display: inline-flex;
+}
+
+.graph-toolbar__corner .form-select {
+    width: auto;
+}
+
 .graph-stage {
     background-color: #f8f9fb;
     border: 1px solid #dfe4ec;
@@ -44,10 +52,4 @@
     overflow: hidden;
     position: relative;
     width: 100%;
-}
-
-.graph-stage__minimap {
-    bottom: 12px;
-    position: absolute;
-    right: 12px;
 }

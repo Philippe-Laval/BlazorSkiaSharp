@@ -11,7 +11,8 @@ Status of `/graph-drawing` (the `SKCanvasView` pan / zoom viewer with minimap).
 | Graph drawing with culling + level of detail | `Graphs/GraphRenderer.cs` |
 | Wheel / trackpad → zoom factor | `Graphs/ZoomMath.cs` |
 | Pointer, wheel and keyboard input bridging | `Graphs/GraphSurfaceInput.cs`, `wwwroot/js/graph-interactions.js` |
-| Minimap component | `Components/MinimapView.razor` |
+| Minimap component | `Components/MinimapView.razor`, `.razor.css` |
+| Minimap layout state and persistence | `Components/MinimapSettings.cs` |
 | Page, toolbar, gestures | `Pages/GraphDrawing.razor` |
 
 **Interaction shipped**
@@ -19,7 +20,10 @@ Status of `/graph-drawing` (the `SKCanvasView` pan / zoom viewer with minimap).
 - Drag to pan, mouse wheel or trackpad pinch to zoom (anchored on the cursor).
 - Two-finger pinch to zoom on touch; panning resumes with the remaining finger.
 - Minimap: click or drag to move the viewport, wheel to zoom it around the cursor.
-- Toolbar: zoom in / out, reset, fit; live zoom readout.
+- Minimap: arrow keys pan, `+` / `-` zoom, and it is reachable by Tab.
+- Minimap: collapsible, resizable by dragging its grip, anchored to any of the four
+  corners; size, corner and visibility are remembered in `localStorage`.
+- Toolbar: zoom in / out, reset, fit, minimap toggle and corner picker; live zoom readout.
 - Keyboard on the focused canvas: `+` `-` zoom, `0` reset, `1` fit, arrows pan.
 
 **Notable implementation decisions**
@@ -64,6 +68,34 @@ Status of `/graph-drawing` (the `SKCanvasView` pan / zoom viewer with minimap).
    are left alone, so the minimap can still centre on the very edge of the graph. Content
    smaller than the surface pans freely, since there is nothing to lose.
 
+### Collapse / expand toggle
+
+A `Minimap` toggle button in the toolbar, with `aria-pressed` reflecting the state.
+Collapsing removes the minimap markup entirely, and `MinimapView` attaches and detaches
+its input listeners from `OnAfterRenderAsync` as the markup comes and goes — the old
+attach-once-in-`OnAfterRender(firstRender)` path would have left a collapsed minimap
+listening to a detached element.
+
+### Resizable, with a remembered position
+
+- A grip in the corner diagonally opposite the anchored corner, drawn in CSS and hit
+  tested against a 16px box plus a 6px tolerance for touch. Pressing inside the grip
+  starts a resize instead of a viewport move.
+- The anchored corner is pinned in *screen* coordinates on pointer down and everything is
+  measured from it, so the minimap grows away from the corner it stays attached to. The
+  box origin is derived from the pointer sample (which carries both client and
+  surface-relative positions) rather than measured through JS.
+- Clamped to 140×100 … 720×520.
+- `MinimapCorner` is a parameter, set from a toolbar `<select>`, and both it and the
+  size are persisted by `MinimapSettingsStore` (plain `localStorage`, no serializer).
+
+### Keyboard-operable
+
+The surface is `tabindex="0"` with `role="application"` and a focus ring. Arrow keys pan
+the main viewport, `+` / `-` zoom it, matching the page's own shortcuts. The JS module
+only calls `preventDefault` for the keys it actually handles, so Tab navigation and
+unhandled keys behave normally.
+
 ### Surface size moved into the viewport
 
 The minimap used to be handed a `Func<SKSize>` (`SourceSizeProvider`) purely because it
@@ -106,15 +138,6 @@ Priority is value per effort. Line references are from the current code.
 6. **`Ctrl`/`Cmd+0` reset and `Ctrl`/`Cmd+1` fit** alongside the bare digits. Bare digits
    only work because the canvas has focus; the modifier is the platform convention.
 
-### Layout and accessibility
-
-7. **Collapse / expand toggle.** 260×170 is a real tax on small screens, and a toggle is
-   the most universally expected minimap feature (Figma, VS Code, draw.io). The one item
-   here that reads as missing rather than optional.
-8. **Resizable minimap**, optionally remembering position and side.
-9. **Keyboard-operable minimap.** It is mouse-only today, so the one widget that gives
-   global navigation is unreachable by keyboard. Focusable, arrows to pan.
-
 ### Only if needed
 
 - **Selection-aware minimap** — highlight selected nodes, frame the selection when
@@ -144,23 +167,35 @@ Worth keeping, because every one was silent — wrong-looking output with no err
 5. **Grab-and-drag means the content follows the pointer.** Panning with
    `translation += pointerDelta` is correct and looks like the drawing is being dragged;
    the intuitive "inverted" reading is wrong. Worth stating because it reads as a bug.
+   Arrow keys are the opposite case: `ArrowRight` moves the *view* right, so the content
+   moves left.
+6. **Blazor renders a `bool` attribute as an HTML boolean attribute.** Writing
+   `aria-pressed="@someBool"` produces `aria-pressed=""` when true and omits it when
+   false, which is wrong for ARIA. Cast to the strings `"true"` / `"false"` instead.
+7. **Gesture-end callbacks need to live with the gesture.** Persisting the minimap size on
+   the page's pointer-up never fired, because a minimap resize is tracked by the
+   minimap's own input, not the page's. `MinimapView.ResizeEnded` now signals it.
 
 ## Verification status
 
 - Build clean, no warnings.
-- `GraphViewport` logic covered by an 81-assertion console harness
-  (`%TEMP%\opencode\viewport-check`, throwaway). All pass. Worth promoting into the repo
-  as a real test project — it is what caught gotcha 4.
-- Verified in the browser on the current build, measuring rendered pixels:
-  - initial fit is pixel-centred (margins 82/82/106/106 on a 738×612 canvas);
-  - grab-and-drag pan is 1:1 with the pointer (step by step: -20 px of pointer per -20 px
-    of content);
-  - the minimap viewport frame stays inside the content rect at every zoom
-    (`[7,252,7,162]` against a content rect of `7..253 / 7..163`);
+- 96 assertions in the throwaway console harness
+  (`%TEMP%\opencode\viewport-check`) against the real `GraphViewport` and
+  `MinimapSettings` sources. All pass. Worth promoting into the repo as a real test
+  project — it is what caught the clamp and the storage-parsing bugs.
+- Verified in the browser on the current build, measuring rendered pixels and reading the
+  DOM:
+  - initial fit is pixel-centred, and still is after the minimap changes;
+  - the minimap viewport frame stays inside the content rect at every zoom;
   - the recorded minimap picture keeps rendering correctly across zoom, pan and minimap
     interaction;
   - at 40% zoom, dragging hard in both directions always leaves the graph visible;
-  - minimap click and wheel still move and zoom the viewport; no console errors.
-- **Not measured:** the frame-time improvement from the picture cache. Reuse is guaranteed
-  by the guard in `EnsurePicture`, and correctness is verified, but the speed-up itself was
-  not benchmarked.
+  - collapse hides the minimap and restores it at the same size;
+  - all four corners position correctly (13px inset from the two anchored edges), and the
+    grip always sits diagonally opposite with the matching resize cursor;
+  - resize drag changes the size, does not move the viewport, preserves the anchor, and
+    clamps at 720×520;
+  - the minimap is focusable; arrow keys pan the main viewport by 48px, `+`/`-` zoom it,
+    and unhandled keys are left alone;
+  - size, corner and collapsed state all survive a reload through `localStorage`;
+  - no console errors.
