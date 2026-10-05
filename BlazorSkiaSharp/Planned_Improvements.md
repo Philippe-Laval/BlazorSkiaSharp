@@ -31,8 +31,38 @@ Status of `/graph-drawing` (the `SKCanvasView` pan / zoom viewer with minimap).
   one id per finger so a second finger can pinch.
 - The minimap is a peer of the main canvas, not a child: both share one `GraphViewport`
   instance and repaint from its `Changed` event.
+- The minimap caches its graph as an `SKPicture` and replays it, because the graph is
+  invariant while only the viewport frame moves.
 
 ## Completed
+
+### Minimap correctness and cost
+
+1. **The viewport frame no longer paints outside the minimap.**
+   `DrawViewportFrame` takes the intersection of the viewport rect with `_content`, rather
+   than clipping. Clipping would slice the stroke in half at the boundary; intersecting
+   draws the stroke whole, on the visible edge, and doubles as the "viewport covers
+   everything" indicator when zoomed out. The graph drawing is still clipped to the
+   content rect.
+   Side effect: `ComputeMapping` was building `_content` with the 4-argument
+   `SKRect.Create`, which is x/y/width/height, so the content rect had no right/bottom
+   padding. Corrected to the `SKRect` constructor.
+
+2. **`SKPaint` objects are now fields.** `_nodePaint`, `_linePaint` and `_framePaint` are
+   allocated once and disposed with the component, like `GraphRenderer` already did.
+
+3. **The minimised graph is recorded once into an `SKPicture` and replayed.**
+   `EnsurePicture` re-records only when `Graph` or `_content` (the minimap size) changes;
+   panning and zooming only replay it. Since the picture is only as good as its cache key,
+   `Graph` is treated as immutable — true today, as `GraphModel` exposes only
+   `init` properties and `IReadOnlyList`. If it ever becomes mutable, add explicit
+   invalidation.
+
+4. **Panning is clamped to the graph bounds, with 15% slack.** `GraphViewport.Bounds` and
+   `GraphViewport.SlackRatio` drive it, and the page publishes `_graph.Bounds`. Only
+   `PanByScreenDelta` is clamped: `CenterOn` and `ZoomAt` are deliberate user actions and
+   are left alone, so the minimap can still centre on the very edge of the graph. Content
+   smaller than the surface pans freely, since there is nothing to lose.
 
 ### Surface size moved into the viewport
 
@@ -62,46 +92,28 @@ Knock-on cleanups:
 
 Priority is value per effort. Line references are from the current code.
 
-### Fixes
-
-1. **The viewport frame is drawn outside the minimap's content rect.**
-   `Components/MinimapView.razor:169` — the graph is drawn inside
-   `Save()` / `ClipRect(_content)` / `Restore()`, but `DrawViewportOverlay` (line 172)
-   runs *after* the restore, so the frame spills over the dark padding and covers the
-   whole widget at 100% zoom. Clip the overlay too, or inset it.
-2. **Three `SKPaint` allocations per minimap frame.**
-   `MinimapView.razor:125`, `:126`, `:182`. Hoist to fields, as `GraphRenderer` already does.
-3. **The minimap re-renders the graph on every viewport change.** The big one: the graph
-   part is invariant, only the frame moves. Record it once into an `SKPicture` (or an
-   `SKImage` sized to the minimap) and blit it, invalidating only when `Graph` or the
-   minimap size changes. Wheel-zoom and drag currently pay for 210 edges + 80 dots per
-   frame through the CPU raster + `putImageData` path.
-4. **Clamp panning to the graph bounds, with slack.** The graph can currently be panned
-   completely off-screen with no way back but `Fit`. Allow ~15% of the viewport past the
-   bounds, then resist, as Figma / draw.io / Miro do.
-
 ### Navigation and interaction
 
-5. **Drag the frame instead of always recentering.** Click should jump-to-centre, but a
+1. **Drag the frame instead of always recentering.** Click should jump-to-centre, but a
    drag that starts *inside the existing frame* should move it 1:1. Needs a hit test plus
    a grab offset. Easier now that the viewport owns `SurfaceSize`.
-6. **Right-click zoom menu.** `Zoom to fit / 100% / 50% / 200%`. Cheap to build from the
+2. **Right-click zoom menu.** `Zoom to fit / 100% / 50% / 200%`. Cheap to build from the
    existing `FitToContent` / `ResetView`.
-7. **Hover crosshair in the main canvas**, showing where the hovered minimap point lands.
-8. **Tooltip on hover.** "Click to jump · drag to pan · wheel to zoom". Currently the
+3. **Hover crosshair in the main canvas**, showing where the hovered minimap point lands.
+4. **Tooltip on hover.** "Click to jump · drag to pan · wheel to zoom". Currently the
    gesture set is only documented in the paragraph above the canvas.
-9. **Zoom percentage inside the minimap corner**, where you need it while using it.
-10. **`Ctrl`/`Cmd+0` reset and `Ctrl`/`Cmd+1` fit** alongside the bare digits. Bare digits
-    only work because the canvas has focus; the modifier is the platform convention.
+5. **Zoom percentage inside the minimap corner**, where you need it while using it.
+6. **`Ctrl`/`Cmd+0` reset and `Ctrl`/`Cmd+1` fit** alongside the bare digits. Bare digits
+   only work because the canvas has focus; the modifier is the platform convention.
 
 ### Layout and accessibility
 
-11. **Collapse / expand toggle.** 260×170 is a real tax on small screens, and a toggle is
-    the most universally expected minimap feature (Figma, VS Code, draw.io). The one item
-    here that reads as missing rather than optional.
-12. **Resizable minimap**, optionally remembering position and side.
-13. **Keyboard-operable minimap.** It is mouse-only today, so the one widget that gives
-    global navigation is unreachable by keyboard. Focusable, arrows to pan.
+7. **Collapse / expand toggle.** 260×170 is a real tax on small screens, and a toggle is
+   the most universally expected minimap feature (Figma, VS Code, draw.io). The one item
+   here that reads as missing rather than optional.
+8. **Resizable minimap**, optionally remembering position and side.
+9. **Keyboard-operable minimap.** It is mouse-only today, so the one widget that gives
+   global navigation is unreachable by keyboard. Focusable, arrows to pan.
 
 ### Only if needed
 
@@ -113,25 +125,42 @@ Priority is value per effort. Line references are from the current code.
 
 ## Gotchas found while building this
 
-Worth keeping, because all three were silent — wrong-looking output with no error.
+Worth keeping, because every one was silent — wrong-looking output with no error.
 
 1. **`SKRect.Create(x, y, width, height)` is x/y/width/height, not left/top/right/bottom.**
-   Passing corners produced oversized rects. Use `new SKRect(l, t, r, b)`.
+   Passing corners produced oversized rects. Use `new SKRect(l, t, r, b)`. This bit twice:
+   once in `GraphModel`, then again in `MinimapView.ComputeMapping`, which had been giving
+   the minimap's content rect no right/bottom padding.
 2. **Canvas transforms pre-concatenate.** `Scale()` then `Translate()` moves by *world*
    units, not screen units. Translate first (`GraphViewport.ApplyTo`, `GraphViewport.cs:97`).
 3. **SkiaSharp 4.x removed `SKPointF`, `SKRectF`, `SKSizeF`.** `SKPoint`/`SKSize`/`SKRect`
    are float-based now. `SKPaint.TextAlign` is also gone; pass alignment to
    `DrawText(...)`. `SKPath.MoveTo`/`LineTo` are obsolete in favour of `SKPathBuilder`.
+4. **Pan clamping has to work from the bounds' edges, not its size.** The first attempt
+   clamped against `bounds.Width * scale`, which is only correct when the bounds start at
+   the world origin. The demo graph's bounds are inset by a margin (`Left`/`Top` are
+   negative), so the limit was off by that margin and the graph could still be dragged out
+   of sight. Covered by the harness now.
+5. **Grab-and-drag means the content follows the pointer.** Panning with
+   `translation += pointerDelta` is correct and looks like the drawing is being dragged;
+   the intuitive "inverted" reading is wrong. Worth stating because it reads as a bug.
 
 ## Verification status
 
 - Build clean, no warnings.
-- `GraphViewport` logic covered by a 47-assertion console harness
-  (`%TEMP%\opencode\viewport-check`, throwaway). All pass. It is worth promoting into the
-  repo as a real test project.
-- DOM and JS wiring confirmed in-browser: both canvases created, `tabIndex` set on the
-  stage by `attachSurface`, no console errors.
-- **Pixel-level behaviour is currently unverified on the latest build.** The browser window
-  went hidden, which throttles `requestAnimationFrame`, so `SKCanvasView` never paints and
-  canvases stay transparent. Fit centring, exact pan deltas and the minimap frame were last
-  confirmed against the pre-refactor build and need re-running once the window is visible.
+- `GraphViewport` logic covered by an 81-assertion console harness
+  (`%TEMP%\opencode\viewport-check`, throwaway). All pass. Worth promoting into the repo
+  as a real test project — it is what caught gotcha 4.
+- Verified in the browser on the current build, measuring rendered pixels:
+  - initial fit is pixel-centred (margins 82/82/106/106 on a 738×612 canvas);
+  - grab-and-drag pan is 1:1 with the pointer (step by step: -20 px of pointer per -20 px
+    of content);
+  - the minimap viewport frame stays inside the content rect at every zoom
+    (`[7,252,7,162]` against a content rect of `7..253 / 7..163`);
+  - the recorded minimap picture keeps rendering correctly across zoom, pan and minimap
+    interaction;
+  - at 40% zoom, dragging hard in both directions always leaves the graph visible;
+  - minimap click and wheel still move and zoom the viewport; no console errors.
+- **Not measured:** the frame-time improvement from the picture cache. Reuse is guaranteed
+  by the guard in `EnsurePicture`, and correctness is verified, but the speed-up itself was
+  not benchmarked.

@@ -1,3 +1,4 @@
 <Solution>
+  <Project Path="BlazorSkiaSharp.Tests/BlazorSkiaSharp.Tests.csproj" Id="bcda56d0-8417-4427-a0be-87b4066a0790" />
   <Project Path="BlazorSkiaSharp/BlazorSkiaSharp.csproj" />
 </Solution>

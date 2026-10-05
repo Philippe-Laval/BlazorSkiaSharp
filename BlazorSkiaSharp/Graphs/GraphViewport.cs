@@ -33,6 +33,20 @@ public sealed class GraphViewport
     /// <summary>Centre of <see cref="SurfaceSize"/>.</summary>
     public SKPoint SurfaceCenter => new(SurfaceSize.Width / 2f, SurfaceSize.Height / 2f);
 
+    /// <summary>
+    /// World rectangle the view should stay over. When the content is larger than the
+    /// surface, dragging is limited so this rectangle cannot leave the view by more than
+    /// <see cref="SlackRatio"/> of it, which stops the content from being dragged away
+    /// and lost. Leave it unset to pan freely.
+    /// </summary>
+    public SKRect? Bounds { get; set; }
+
+    /// <summary>
+    /// How far <see cref="Bounds"/> may leave the surface while dragging, as a fraction of
+    /// the surface size. Zero pins the content to the surface edge.
+    /// </summary>
+    public float SlackRatio { get; set; } = 0.15f;
+
     /// <summary>Raised whenever the transform changed and both surfaces should repaint.</summary>
     public event Action? Changed;
 
@@ -149,13 +163,52 @@ public sealed class GraphViewport
     }
 
     /// <summary>Scrolls the content by a canvas pixel delta.</summary>
+    /// <remarks>
+    /// Dragging is clamped to <see cref="Bounds"/>. The other ways of moving the view
+    /// (<see cref="CenterOn"/>, <see cref="ZoomAt"/>) are deliberate user actions and are
+    /// left alone, so the minimap can still centre on the very edge of the graph.
+    /// </remarks>
     public void PanByScreenDelta(float dx, float dy)
     {
         if (dx == 0f && dy == 0f)
             return;
 
-        translation = new SKPoint(translation.X + dx, translation.Y + dy);
+        var bounds = Bounds;
+
+        translation = new SKPoint(
+            ClampAxis(translation.X + dx, SurfaceSize.Width, bounds?.Left ?? 0f, bounds?.Right ?? 0f),
+            ClampAxis(translation.Y + dy, SurfaceSize.Height, bounds?.Top ?? 0f, bounds?.Bottom ?? 0f));
+
         NotifyChanged();
+    }
+
+    /// <summary>
+    /// Limits one axis of the translation so at least <see cref="SlackRatio"/> of
+    /// <see cref="Bounds"/> stays visible against whichever edge it is pushed against.
+    /// </summary>
+    /// <remarks>
+    /// This works from the bounds' own edges rather than its size: bounds usually have a
+    /// non zero origin, and using the size would shift the limit by that origin.
+    /// </remarks>
+    private float ClampAxis(float value, float surfaceExtent, float boundMin, float boundMax)
+    {
+        // Nothing to clamp against yet.
+        if (surfaceExtent <= 0f || boundMax <= boundMin || scale <= 0f)
+            return value;
+
+        // Content smaller than the surface cannot be lost, so it pans freely.
+        if ((boundMax - boundMin) * scale <= surfaceExtent)
+            return value;
+
+        var slack = surfaceExtent * Math.Clamp(SlackRatio, 0f, 1f);
+
+        // Against the low edge: the far side of the bounds stops at the slack.
+        var minimum = slack - (boundMax * scale);
+
+        // Against the high edge: the near side of the bounds stops at the slack.
+        var maximum = surfaceExtent - slack - (boundMin * scale);
+
+        return maximum < minimum ? value : Math.Clamp(value, minimum, maximum);
     }
 
     /// <summary>Moves the transform so that <paramref name="worldCenter"/> sits at the surface centre.</summary>

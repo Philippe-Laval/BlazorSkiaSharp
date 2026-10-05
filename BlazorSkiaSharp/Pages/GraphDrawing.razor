@@ -75,7 +75,14 @@
     [Inject]
     private IJSRuntime JS { get; set; } = default!;
 
-    protected override void OnInitialized() => _viewport.Changed += OnViewportChanged;
+    protected override void OnInitialized()
+    {
+        // Keeps the graph reachable while dragging: the viewport will not let it be
+        // panned further than the slack away from the surface.
+        _viewport.Bounds = _graph.Bounds;
+
+        _viewport.Changed += OnViewportChanged;
+    }
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {

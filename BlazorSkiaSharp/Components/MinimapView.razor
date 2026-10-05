@@ -20,6 +20,11 @@
     private static readonly SKColor ViewportStroke = new(0x38, 0xBD, 0xF8, 0xE6);
     private const float ContentPadding = 7f;
 
+    // Reused between frames; a paint per frame would be pure churn at 60fps.
+    private readonly SKPaint _nodePaint = new() { IsAntialias = true, Style = SKPaintStyle.Fill };
+    private readonly SKPaint _linePaint = new() { IsAntialias = true, Style = SKPaintStyle.Stroke };
+    private readonly SKPaint _framePaint = new() { IsAntialias = true };
+
     private ElementReference _surface;
     private SKCanvasView? _canvas;
     private GraphSurfaceInput? _input;
@@ -34,6 +39,14 @@
     private float _miniScale = 1f;
 
     private SKPoint _miniTranslation;
+
+    /// <summary>
+    /// The minimised graph, recorded once and replayed. Only the viewport frame moves,
+    /// so re-recording the graph on every pan or wheel tick is wasted work.
+    /// </summary>
+    private SKPicture? _picture;
+    private GraphModel? _pictureGraph;
+    private SKRect _pictureContent;
 
     /// <summary>The graph to display.</summary>
     [Parameter, EditorRequired]
@@ -110,6 +123,12 @@
             await _input.DisposeAsync();
             _input = null;
         }
+
+        _picture?.Dispose();
+        _picture = null;
+        _nodePaint.Dispose();
+        _linePaint.Dispose();
+        _framePaint.Dispose();
     }
 
     private void OnViewportChanged() => _canvas?.Invalidate();
@@ -121,25 +140,58 @@
 
         canvas.Clear(Backdrop);
         ComputeMapping(size);
+        EnsurePicture();
 
-        using var nodePaint = new SKPaint { IsAntialias = true, Style = SKPaintStyle.Fill };
-        using var linePaint = new SKPaint { IsAntialias = true, Style = SKPaintStyle.Stroke };
-
+        // Everything is confined to the content rect: the graph so it never bleeds over
+        // the padding, and the viewport frame so it cannot paint outside the minimap.
         canvas.Save();
         canvas.ClipRect(_content, SKClipOperation.Intersect, false);
 
+        _picture?.Playback(canvas);
+        DrawViewportFrame(canvas);
+
+        canvas.Restore();
+    }
+
+    /// <summary>
+    /// Records the minimised graph, reusing the previous recording while the graph and
+    /// the minimap size are unchanged.
+    /// </summary>
+    private void EnsurePicture()
+    {
+        if (_picture is not null && ReferenceEquals(_pictureGraph, Graph) && _pictureContent == _content)
+            return;
+
+        _picture?.Dispose();
+        _picture = null;
+        _pictureGraph = Graph;
+        _pictureContent = _content;
+
+        using var recorder = new SKPictureRecorder();
+
+        // The cull rect is only a hint, so keep it slightly larger than the content.
+        var recording = recorder.BeginRecording(
+            new SKRect(-1f, -1f, _content.Right + 2f, _content.Bottom + 2f));
+
         // Translate before scaling: canvas transforms pre-concatenate, see GraphViewport.
-        canvas.Translate(_miniTranslation.X, _miniTranslation.Y);
-        canvas.Scale(_miniScale);
+        recording.Translate(_miniTranslation.X, _miniTranslation.Y);
+        recording.Scale(_miniScale);
 
+        DrawGraph(recording);
+
+        _picture = recorder.EndRecording();
+    }
+
+    private void DrawGraph(SKCanvas canvas)
+    {
         // The graph bounds, so the extent of the drawing stays visible when zoomed in.
-        linePaint.Style = SKPaintStyle.Fill;
-        linePaint.Color = BoundsColor;
-        canvas.DrawRect(Graph.Bounds, linePaint);
+        _linePaint.Style = SKPaintStyle.Fill;
+        _linePaint.Color = BoundsColor;
+        canvas.DrawRect(Graph.Bounds, _linePaint);
 
-        linePaint.Style = SKPaintStyle.Stroke;
-        linePaint.Color = GraphRenderer.EdgeStrokeColor;
-        linePaint.StrokeWidth = MathF.Max(4f, 1.2f / _miniScale);
+        _linePaint.Style = SKPaintStyle.Stroke;
+        _linePaint.Color = GraphRenderer.EdgeStrokeColor;
+        _linePaint.StrokeWidth = MathF.Max(4f, 1.2f / _miniScale);
 
         foreach (var edge in Graph.Edges)
         {
@@ -150,7 +202,7 @@
 
             var from = Graph.Nodes[edge.From].Position;
             var to = Graph.Nodes[edge.To].Position;
-            canvas.DrawLine(from.X, from.Y, to.X, to.Y, linePaint);
+            canvas.DrawLine(from.X, from.Y, to.X, to.Y, _linePaint);
         }
 
         var radius = Graph.Nodes.Count > 0 ? Graph.Nodes[0].Radius : 54f;
@@ -160,40 +212,39 @@
 
         foreach (var node in Graph.Nodes)
         {
-            nodePaint.Color = node.Fill;
-            canvas.DrawCircle(node.Position.X, node.Position.Y, radius, nodePaint);
+            _nodePaint.Color = node.Fill;
+            canvas.DrawCircle(node.Position.X, node.Position.Y, radius, _nodePaint);
         }
-
-        canvas.Restore();
-
-        DrawViewportOverlay(canvas);
     }
 
-    private void DrawViewportOverlay(SKCanvas canvas)
+    private void DrawViewportFrame(SKCanvas canvas)
     {
         if (!Viewport.HasSurface)
             return;
 
-        var visible = Viewport.GetVisibleWorldRect();
-        var topLeft = WorldToMini(visible.Left, visible.Top);
-        var bottomRight = WorldToMini(visible.Right, visible.Bottom);
-        var frame = new SKRect(topLeft.X, topLeft.Y, bottomRight.X, bottomRight.Y);
+        // The frame is the intersection with the content area: drawing it unclipped would
+        // spill over the padding, and clipping it would slice its stroke in half.
+        var frame = Intersect(WorldRectToMini(Viewport.GetVisibleWorldRect()), _content);
 
-        using var paint = new SKPaint { IsAntialias = true };
+        if (frame.Width <= 0f || frame.Height <= 0f)
+            return;
 
-        paint.Style = SKPaintStyle.Fill;
-        paint.Color = ViewportFill;
-        canvas.DrawRect(frame, paint);
+        _framePaint.Style = SKPaintStyle.Fill;
+        _framePaint.Color = ViewportFill;
+        canvas.DrawRect(frame, _framePaint);
+
+        _framePaint.Style = SKPaintStyle.Stroke;
 
         // Stay readable when zoomed far out and the frame covers the whole minimap.
-        paint.Style = SKPaintStyle.Stroke;
-        paint.StrokeWidth = frame.Width >= _content.Width && frame.Height >= _content.Height ? 3f : 1.5f;
-        paint.Color = ViewportStroke;
-        canvas.DrawRect(frame, paint);
+        _framePaint.StrokeWidth = frame.Width >= _content.Width * 0.98f && frame.Height >= _content.Height * 0.98f ? 3f : 1.5f;
+        _framePaint.Color = ViewportStroke;
+        canvas.DrawRect(frame, _framePaint);
     }
 
     private void ComputeMapping(SKSize size)
     {
+        // NB: the constructor takes left / top / right / bottom, unlike SKRect.Create,
+        // which would read these as x / y / width / height.
         _content = new SKRect(
             ContentPadding,
             ContentPadding,
@@ -230,6 +281,27 @@
     private SKPoint MiniToWorld(SKPoint mini) => new(
         (mini.X - _miniTranslation.X) / _miniScale,
         (mini.Y - _miniTranslation.Y) / _miniScale);
+
+    private SKRect WorldRectToMini(SKRect world)
+    {
+        // _miniScale is always positive, so the corners stay in order.
+        var topLeft = WorldToMini(world.Left, world.Top);
+        var bottomRight = WorldToMini(world.Right, world.Bottom);
+
+        return new SKRect(topLeft.X, topLeft.Y, bottomRight.X, bottomRight.Y);
+    }
+
+    private static SKRect Intersect(SKRect a, SKRect b)
+    {
+        var left = MathF.Max(a.Left, b.Left);
+        var top = MathF.Max(a.Top, b.Top);
+        var right = MathF.Min(a.Right, b.Right);
+        var bottom = MathF.Min(a.Bottom, b.Bottom);
+
+        return right > left && bottom > top
+            ? new SKRect(left, top, right, bottom)
+            : SKRect.Empty;
+    }
 
     private void OnPointerPressed(PointerSample sample)
     {
