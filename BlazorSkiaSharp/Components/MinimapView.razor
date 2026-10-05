@@ -11,7 +11,7 @@
              @ref="_surface"
              tabindex="0"
              role="application"
-             aria-label="Graph minimap. Arrow keys to pan the view, plus and minus to zoom, drag to move the view, wheel to zoom."
+             aria-label="Graph minimap. Arrow keys to pan the view, plus and minus to zoom, click to jump to a point, drag the highlighted frame to move the view, wheel to zoom."
              style="width: @(Width)px; height: @(Height)px;">
             <SKCanvasView @ref="_canvas"
                           OnPaintSurface="OnPaintSurface"
@@ -53,12 +53,28 @@
     private bool _draggingViewport;
     private bool _resizing;
 
+    /// <summary>Where the pointer went down, so the gesture can be told from a click.</summary>
+    private SKPoint _pressPosition;
+
+    /// <summary>True once the pointer has moved far enough to count as a drag.</summary>
+    private bool _movedSincePress;
+
+    /// <summary>
+    /// Offset from the pointer to the frame centre, captured on press. Non zero when the
+    /// press landed on the frame, which is what makes the frame follow the pointer 1:1
+    /// instead of snapping its centre under it.
+    /// </summary>
+    private SKPoint _grabOffset;
+
     /// <summary>Screen position of the anchored corner, kept fixed while resizing.</summary>
     private float _resizeAnchorX;
     private float _resizeAnchorY;
 
     /// <summary>Inner rectangle of the minimap, everything is mapped into it.</summary>
     private SKRect _content;
+
+    /// <summary>Size the mapping was last computed for, so pointer input can spot it as stale.</summary>
+    private SKSize _mappedSize;
 
     /// <summary>World to minimap transform, same shape as <see cref="GraphViewport"/>.</summary>
     private float _miniScale = 1f;
@@ -192,8 +208,7 @@
         await _input.DisposeAsync();
         _input = null;
 
-        _draggingViewport = false;
-        _resizing = false;
+        ResetDrag();
     }
 
     public async ValueTask DisposeAsync()
@@ -305,12 +320,7 @@
 
     private void DrawViewportFrame(SKCanvas canvas)
     {
-        if (!Viewport.HasSurface)
-            return;
-
-        // The frame is the intersection with the content area: drawing it unclipped would
-        // spill over the padding, and clipping it would slice its stroke in half.
-        var frame = Intersect(WorldRectToMini(Viewport.GetVisibleWorldRect()), _content);
+        var frame = ViewportFrameRect();
 
         if (frame.Width <= 0f || frame.Height <= 0f)
             return;
@@ -327,8 +337,41 @@
         canvas.DrawRect(frame, _framePaint);
     }
 
+    /// <summary>
+    /// The viewport frame in minimap coordinates. Drawing and hit testing share this one so
+    /// the grabbable area can never drift from what is painted.
+    /// </summary>
+    /// <remarks>
+    /// This is the intersection with the content area, not the raw frame: the unclipped
+    /// frame would offer a grab target the user cannot see, and the clipped one would have
+    /// its stroke sliced in half.
+    /// </remarks>
+    private SKRect ViewportFrameRect()
+    {
+        if (!Viewport.HasSurface)
+            return SKRect.Empty;
+
+        EnsureMapping();
+
+        return Intersect(WorldRectToMini(Viewport.GetVisibleWorldRect()), _content);
+    }
+
+    /// <summary>
+    /// Rebuilds the mapping if it is stale. A pointer press needs the frame to hit test
+    /// against, and it cannot wait for the next paint to have an up to date one.
+    /// </summary>
+    private void EnsureMapping()
+    {
+        var size = new SKSize(Width, Height);
+
+        if (_mappedSize != size)
+            ComputeMapping(size);
+    }
+
     private void ComputeMapping(SKSize size)
     {
+        _mappedSize = size;
+
         // NB: the constructor takes left / top / right / bottom, unlike SKRect.Create,
         // which would read these as x / y / width / height.
         _content = new SKRect(
@@ -400,8 +443,17 @@
             BeginResize(sample);
         else
         {
+            var press = new SKPoint(sample.X, sample.Y);
+
+            _pressPosition = press;
+            _movedSincePress = false;
+
+            // Inside the frame this is the offset that makes it follow the pointer; outside
+            // it is zero, so the same call centres the view where the pointer landed.
+            _grabOffset = MinimapFrameDrag.GrabOffset(ViewportFrameRect(), press);
+
             _draggingViewport = true;
-            CenterMainViewport(new SKPoint(sample.X, sample.Y));
+            CenterMainViewport(MinimapFrameDrag.Target(press, _grabOffset));
         }
 
         _ = BeginDragAsync();
@@ -416,8 +468,7 @@
         }
         catch (JSException)
         {
-            _draggingViewport = false;
-            _resizing = false;
+            ResetDrag();
         }
     }
 
@@ -432,19 +483,40 @@
             return;
         }
 
-        if (_draggingViewport)
-            CenterMainViewport(new SKPoint(sample.X, sample.Y));
+        if (!_draggingViewport)
+            return;
+
+        var current = new SKPoint(sample.X, sample.Y);
+
+        if (!MinimapFrameDrag.IsClick(_pressPosition, current))
+            _movedSincePress = true;
+
+        CenterMainViewport(MinimapFrameDrag.Target(current, _grabOffset));
     }
 
     private void OnPointerReleased(long pointerId)
     {
         var wasResizing = _resizing;
+        var wasClick = _draggingViewport && !_movedSincePress;
 
-        _draggingViewport = false;
-        _resizing = false;
+        ResetDrag();
 
         if (wasResizing)
             ResizeEnded.InvokeAsync();
+
+        // A press that never travelled is a click, and a click always centres on where it
+        // landed, even when it started on the frame. The release carries no position, so
+        // the press has to be remembered to be able to honour this.
+        if (wasClick)
+            CenterMainViewport(_pressPosition);
+    }
+
+    private void ResetDrag()
+    {
+        _draggingViewport = false;
+        _resizing = false;
+        _movedSincePress = false;
+        _grabOffset = SKPoint.Empty;
     }
 
     private bool IsOnGrip(float x, float y)

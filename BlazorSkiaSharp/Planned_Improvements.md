@@ -13,13 +13,16 @@ Status of `/graph-drawing` (the `SKCanvasView` pan / zoom viewer with minimap).
 | Pointer, wheel and keyboard input bridging | `Graphs/GraphSurfaceInput.cs`, `wwwroot/js/graph-interactions.js` |
 | Minimap component | `Components/MinimapView.razor`, `.razor.css` |
 | Minimap layout state and persistence | `Components/MinimapSettings.cs` |
+| Minimap frame drag geometry | `Components/MinimapFrameDrag.cs` |
+| Tests for the above | `BlazorSkiaSharp.Tests/` (MSTest, 90 tests) |
 | Page, toolbar, gestures | `Pages/GraphDrawing.razor` |
 
 **Interaction shipped**
 
 - Drag to pan, mouse wheel or trackpad pinch to zoom (anchored on the cursor).
 - Two-finger pinch to zoom on touch; panning resumes with the remaining finger.
-- Minimap: click or drag to move the viewport, wheel to zoom it around the cursor.
+- Minimap: click to jump, drag the highlighted frame to move the viewport 1:1, wheel to
+  zoom it around the cursor.
 - Minimap: arrow keys pan, `+` / `-` zoom, and it is reachable by Tab.
 - Minimap: collapsible, resizable by dragging its grip, anchored to any of the four
   corners; size, corner and visibility are remembered in `localStorage`.
@@ -67,6 +70,33 @@ Status of `/graph-drawing` (the `SKCanvasView` pan / zoom viewer with minimap).
    `PanByScreenDelta` is clamped: `CenterOn` and `ZoomAt` are deliberate user actions and
    are left alone, so the minimap can still centre on the very edge of the graph. Content
    smaller than the surface pans freely, since there is nothing to lose.
+
+### Minimap frame dragging
+
+A press that lands on the viewport frame now grabs it and moves it 1:1, instead of
+snapping the frame's centre under the pointer. Clicking still jumps-to-centre.
+
+- `Components/MinimapFrameDrag.cs` holds the geometry as pure static functions:
+  `Contains` (hit test), `GrabOffset` (pointer → frame centre offset), `Target` (where the
+  centre goes this frame) and `IsClick` (has the pointer really travelled). Pure so the
+  fiddly part is testable without a browser.
+- The offset is zero when the press lands outside the frame, so the same code path degrades
+  to the old jump-to-centre behaviour. No branch per move.
+- `ViewportFrameRect()` is now the single source for both drawing and hit testing. They
+  have to agree: an unclipped frame would offer a grab target the user cannot see.
+- `EnsureMapping()` rebuilds the mapping when it is stale. A pointer press needs the frame
+  to hit test against and cannot wait for the next paint, which previously meant the hit
+  test could run against last frame's mapping.
+- Hit tolerance is 3px, because the frame shrinks to a few pixels when zoomed right in and
+  would otherwise be ungrabbable. Click slop is also 3px.
+- The grip still wins over the frame: `IsOnGrip` is tested first.
+- Resetting drag state is now one `ResetDrag()` call, shared by the release, the failed
+  `BeginDragAsync`, and detach-when-collapsed.
+
+Verified in the browser by measuring the rendered frame: at 40% zoom a drag starting
+inside the frame moved it by exactly (22, −14) for a pointer delta of (22, −14), with no
+jump on press; a press outside the frame put the frame centre within 0.5px of the press
+point. Grip precedence still resizes.
 
 ### Collapse / expand toggle
 
@@ -126,9 +156,8 @@ Priority is value per effort. Line references are from the current code.
 
 ### Navigation and interaction
 
-1. **Drag the frame instead of always recentering.** Click should jump-to-centre, but a
-   drag that starts *inside the existing frame* should move it 1:1. Needs a hit test plus
-   a grab offset. Easier now that the viewport owns `SurfaceSize`.
+1. ~~**Drag the frame instead of always recentering.**~~ Done, see
+   [Minimap frame dragging](#minimap-frame-dragging).
 2. **Right-click zoom menu.** `Zoom to fit / 100% / 50% / 200%`. Cheap to build from the
    existing `FitToContent` / `ResetView`.
 3. **Hover crosshair in the main canvas**, showing where the hovered minimap point lands.
@@ -179,10 +208,14 @@ Worth keeping, because every one was silent — wrong-looking output with no err
 ## Verification status
 
 - Build clean, no warnings.
-- 96 assertions in the throwaway console harness
-  (`%TEMP%\opencode\viewport-check`) against the real `GraphViewport` and
-  `MinimapSettings` sources. All pass. Worth promoting into the repo as a real test
-  project — it is what caught the clamp and the storage-parsing bugs.
+- 90 MSTest tests in `BlazorSkiaSharp.Tests` against the real sources. The earlier
+  throwaway console harness has been promoted into them.
+- Mutation-tested rather than just "green", because a suite can pass for the wrong reason:
+  19 deliberate breakages of `GraphViewport`, `MinimapSettings` and `MinimapFrameDrag` were
+  each run against the suite, and all 19 were caught. One first attempt at relaxing the
+  `MinimapSettings` field count *survived*, which exposed a real gap — the junk inputs in
+  the table all happened to stay invalid for other reasons — so the test was extended with
+  inputs whose first four fields are valid.
 - Verified in the browser on the current build, measuring rendered pixels and reading the
   DOM:
   - initial fit is pixel-centred, and still is after the minimap changes;
@@ -198,4 +231,7 @@ Worth keeping, because every one was silent — wrong-looking output with no err
   - the minimap is focusable; arrow keys pan the main viewport by 48px, `+`/`-` zoom it,
     and unhandled keys are left alone;
   - size, corner and collapsed state all survive a reload through `localStorage`;
+  - frame drag: a drag starting inside the frame moves it by exactly the pointer delta with
+    no jump on press; a click inside jumps the frame centre onto the press point; a press
+    outside the frame centres on it (within 0.5px, i.e. antialiasing);
   - no console errors.
