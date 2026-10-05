@@ -14,7 +14,7 @@ Status of `/graph-drawing` (the `SKCanvasView` pan / zoom viewer with minimap).
 | Minimap component | `Components/MinimapView.razor`, `.razor.css` |
 | Minimap layout state and persistence | `Components/MinimapSettings.cs` |
 | Minimap frame drag geometry | `Components/MinimapFrameDrag.cs` |
-| Tests for the above | `BlazorSkiaSharp.Tests/` (MSTest, 90 tests) |
+| Tests for the above | `BlazorSkiaSharp.Tests/` (MSTest, 91 tests) |
 | Page, toolbar, gestures | `Pages/GraphDrawing.razor` |
 
 **Interaction shipped**
@@ -192,7 +192,7 @@ Worth keeping, because every one was silent — wrong-looking output with no err
    clamped against `bounds.Width * scale`, which is only correct when the bounds start at
    the world origin. The demo graph's bounds are inset by a margin (`Left`/`Top` are
    negative), so the limit was off by that margin and the graph could still be dragged out
-   of sight. Covered by the harness now.
+   of sight. Covered by `ClampingHandlesBoundsWithANegativeOrigin`.
 5. **Grab-and-drag means the content follows the pointer.** Panning with
    `translation += pointerDelta` is correct and looks like the drawing is being dragged;
    the intuitive "inverted" reading is wrong. Worth stating because it reads as a bug.
@@ -208,14 +208,23 @@ Worth keeping, because every one was silent — wrong-looking output with no err
 ## Verification status
 
 - Build clean, no warnings.
-- 90 MSTest tests in `BlazorSkiaSharp.Tests` against the real sources. The earlier
-  throwaway console harness has been promoted into them.
+- 91 MSTest tests in `BlazorSkiaSharp.Tests`, covering `GraphViewport`, `MinimapSettings`
+  and `MinimapFrameDrag` against the real sources. The throwaway console harness that these
+  replaced has been deleted: all 83 of its named checks are represented, either as a named
+  test or as an assertion folded into one.
 - Mutation-tested rather than just "green", because a suite can pass for the wrong reason:
-  19 deliberate breakages of `GraphViewport`, `MinimapSettings` and `MinimapFrameDrag` were
-  each run against the suite, and all 19 were caught. One first attempt at relaxing the
-  `MinimapSettings` field count *survived*, which exposed a real gap — the junk inputs in
-  the table all happened to stay invalid for other reasons — so the test was extended with
-  inputs whose first four fields are valid.
+  21 deliberate breakages of `GraphViewport`, `MinimapSettings` and `MinimapFrameDrag` were
+  each run against the suite, and all 21 were caught. Two of those runs found real gaps
+  rather than confirming coverage:
+  - relaxing the `MinimapSettings` field count *survived*, because every junk input in the
+    table happened to stay invalid for other reasons. Fixed by adding inputs whose first
+    four fields are valid, which is the only thing that distinguishes a strict count from a
+    lax one;
+  - the clamp suite had no test that a *fitted* view with a non-zero-origin bounds lands
+    inside the clamp range. Every other clamp test either zoomed in first or used
+    origin-0 rects, so it could not see a clamp built from the bounds' size instead of its
+    edges. `TheDemoGraphsFitSitsInsideTheClampRange` closes that, and both size-for-edges
+    mutations are now caught.
 - Verified in the browser on the current build, measuring rendered pixels and reading the
   DOM:
   - initial fit is pixel-centred, and still is after the minimap changes;

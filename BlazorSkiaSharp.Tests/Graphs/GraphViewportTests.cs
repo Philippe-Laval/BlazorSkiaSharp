@@ -604,6 +604,21 @@ public sealed class GraphViewportTests
     }
 
     [TestMethod]
+    public void TheDemoGraphsFitSitsInsideTheClampRange()
+    {
+        // The demo bounds start left of and above the origin, so this is the case where
+        // clamping from the size instead of the edges would put the fitted view outside
+        // the range. BigSquare, used above, starts at the origin and cannot catch that.
+        var viewport = new GraphViewport { Bounds = World };
+        viewport.AttachSurface(Surface);
+
+        viewport.FitTo(World);
+
+        AssertInClampRange("X", viewport.Translation.X, Surface.Width, World.Width, viewport.Scale);
+        AssertInClampRange("Y", viewport.Translation.Y, Surface.Height, World.Height, viewport.Scale);
+    }
+
+    [TestMethod]
     public void CentringOnTheGraphEdgeIsNotClamped()
     {
         var viewport = ZoomedInto(BigSquare, 2f);
