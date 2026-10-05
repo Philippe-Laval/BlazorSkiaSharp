@@ -9,10 +9,13 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <Folder Include="Components\" />
-    <Folder Include="Graphs\" />
-    <Folder Include="Pages\" />
-    <Folder Include="wwwroot\js\" />
+    <ProjectReference Include="..\BlazorSkiaSharp\BlazorSkiaSharp.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- MinimapSettingsStore and GraphSurfaceInput take an IJSRuntime, which lives in
+         Microsoft.AspNetCore.App rather than in the shared framework. -->
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
   </ItemGroup>
 
 </Project>
