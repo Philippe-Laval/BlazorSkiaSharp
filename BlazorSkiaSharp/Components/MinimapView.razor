@@ -1,0 +1,301 @@
+@using SkiaSharp
+@using SkiaSharp.Views.Blazor
+@using Microsoft.JSInterop
+@using BlazorSkiaSharp.Graphs
+@implements IAsyncDisposable
+
+<div class="graph-minimap" @ref="_surface" style="width: @(Width)px; height: @(Height)px;">
+    <SKCanvasView @ref="_canvas"
+                  OnPaintSurface="OnPaintSurface"
+                  IgnorePixelScaling="true"
+                  role="img"
+                  aria-label="Graph minimap, drag to move the viewport"
+                  style="width:100%;height:100%;display:block;touch-action:none;cursor:crosshair" />
+</div>
+
+@code {
+    private static readonly SKColor Backdrop = new(0x1E, 0x24, 0x30, 0xF0);
+    private static readonly SKColor BoundsColor = new(0x8A, 0x9B, 0xB8, 0x99);
+    private static readonly SKColor ViewportFill = new(0x38, 0xBD, 0xF8, 0x1F);
+    private static readonly SKColor ViewportStroke = new(0x38, 0xBD, 0xF8, 0xE6);
+    private const float ContentPadding = 7f;
+
+    private ElementReference _surface;
+    private SKCanvasView? _canvas;
+    private GraphSurfaceInput? _input;
+    private GraphViewport? _subscribed;
+    private bool _disposed;
+    private bool _dragging;
+
+    /// <summary>Inner rectangle of the minimap, everything is mapped into it.</summary>
+    private SKRect _content;
+
+    /// <summary>World to minimap transform, same shape as <see cref="GraphViewport"/>.</summary>
+    private float _miniScale = 1f;
+
+    private SKPoint _miniTranslation;
+
+    /// <summary>The graph to display.</summary>
+    [Parameter, EditorRequired]
+    public GraphModel Graph { get; set; } = default!;
+
+    /// <summary>The transform shared with the main canvas.</summary>
+    [Parameter, EditorRequired]
+    public GraphViewport Viewport { get; set; } = default!;
+
+    /// <summary>
+    /// Size in pixels of the main canvas. Passed as a delegate because it is only known
+    /// once the canvas has been painted, and reading it must not require a re-render.
+    /// </summary>
+    [Parameter]
+    public Func<SKSize>? SourceSizeProvider { get; set; }
+
+    [Parameter]
+    public int Width { get; set; } = 260;
+
+    [Parameter]
+    public int Height { get; set; } = 170;
+
+    [Inject]
+    private IJSRuntime JS { get; set; } = default!;
+
+    protected override void OnParametersSet()
+    {
+        if (!ReferenceEquals(_subscribed, Viewport))
+        {
+            if (_subscribed is not null)
+                _subscribed.Changed -= OnViewportChanged;
+
+            _subscribed = Viewport;
+            _subscribed.Changed += OnViewportChanged;
+        }
+
+        _canvas?.Invalidate();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender)
+            return;
+
+        _input = new GraphSurfaceInput(JS, _surface);
+
+        // stopPropagation: the minimap is nested inside the main canvas surface, and both
+        // would otherwise react to the same gesture.
+        _input.PointerPressed += OnPointerPressed;
+        _input.PointerMoved += OnPointerMoved;
+        _input.PointerReleased += OnPointerReleased;
+        _input.Wheel += OnWheel;
+
+        try
+        {
+            await _input.AttachAsync(focusable: false, stopPropagation: true);
+        }
+        catch (JSException)
+        {
+            // JavaScript is not available: the minimap stays a read only overview.
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        _disposed = true;
+
+        if (_subscribed is not null)
+        {
+            _subscribed.Changed -= OnViewportChanged;
+            _subscribed = null;
+        }
+
+        if (_input is not null)
+        {
+            _input.PointerPressed -= OnPointerPressed;
+            _input.PointerMoved -= OnPointerMoved;
+            _input.PointerReleased -= OnPointerReleased;
+            _input.Wheel -= OnWheel;
+            await _input.DisposeAsync();
+            _input = null;
+        }
+    }
+
+    private void OnViewportChanged() => _canvas?.Invalidate();
+
+    /// <summary>Requests a repaint, for example when the main canvas has been resized.</summary>
+    public void Invalidate() => _canvas?.Invalidate();
+
+    private void OnPaintSurface(SKPaintSurfaceEventArgs e)
+    {
+        var canvas = e.Surface.Canvas;
+        var size = new SKSize(e.Info.Width, e.Info.Height);
+
+        canvas.Clear(Backdrop);
+        ComputeMapping(size);
+
+        using var nodePaint = new SKPaint { IsAntialias = true, Style = SKPaintStyle.Fill };
+        using var linePaint = new SKPaint { IsAntialias = true, Style = SKPaintStyle.Stroke };
+
+        canvas.Save();
+        canvas.ClipRect(_content, SKClipOperation.Intersect, false);
+
+        // Translate before scaling: canvas transforms pre-concatenate, see GraphViewport.
+        canvas.Translate(_miniTranslation.X, _miniTranslation.Y);
+        canvas.Scale(_miniScale);
+
+        // The graph bounds, so the extent of the drawing stays visible when zoomed in.
+        linePaint.Style = SKPaintStyle.Fill;
+        linePaint.Color = BoundsColor;
+        canvas.DrawRect(Graph.Bounds, linePaint);
+
+        linePaint.Style = SKPaintStyle.Stroke;
+        linePaint.Color = GraphRenderer.EdgeStrokeColor;
+        linePaint.StrokeWidth = MathF.Max(4f, 1.2f / _miniScale);
+
+        foreach (var edge in Graph.Edges)
+        {
+            // A malformed model should not break the render loop.
+            if (edge.From < 0 || edge.From >= Graph.Nodes.Count ||
+                edge.To < 0 || edge.To >= Graph.Nodes.Count)
+                continue;
+
+            var from = Graph.Nodes[edge.From].Position;
+            var to = Graph.Nodes[edge.To].Position;
+            canvas.DrawLine(from.X, from.Y, to.X, to.Y, linePaint);
+        }
+
+        var radius = Graph.Nodes.Count > 0 ? Graph.Nodes[0].Radius : 54f;
+
+        // Keep the dots visible even when the whole graph is squeezed into a few pixels.
+        radius = MathF.Max(radius, 3f / _miniScale);
+
+        foreach (var node in Graph.Nodes)
+        {
+            nodePaint.Color = node.Fill;
+            canvas.DrawCircle(node.Position.X, node.Position.Y, radius, nodePaint);
+        }
+
+        canvas.Restore();
+
+        DrawViewportOverlay(canvas);
+    }
+
+    private void DrawViewportOverlay(SKCanvas canvas)
+    {
+        var source = SourceSizeProvider?.Invoke() ?? SKSize.Empty;
+
+        if (source.Width <= 0f || source.Height <= 0f)
+            return;
+
+        var visible = Viewport.GetVisibleWorldRect(source);
+        var topLeft = WorldToMini(visible.Left, visible.Top);
+        var bottomRight = WorldToMini(visible.Right, visible.Bottom);
+        var frame = new SKRect(topLeft.X, topLeft.Y, bottomRight.X, bottomRight.Y);
+
+        using var paint = new SKPaint { IsAntialias = true };
+
+        paint.Style = SKPaintStyle.Fill;
+        paint.Color = ViewportFill;
+        canvas.DrawRect(frame, paint);
+
+        // Stay readable when zoomed far out and the frame covers the whole minimap.
+        paint.Style = SKPaintStyle.Stroke;
+        paint.StrokeWidth = frame.Width >= _content.Width && frame.Height >= _content.Height ? 3f : 1.5f;
+        paint.Color = ViewportStroke;
+        canvas.DrawRect(frame, paint);
+    }
+
+    private void ComputeMapping(SKSize size)
+    {
+        _content = new SKRect(
+            ContentPadding,
+            ContentPadding,
+            MathF.Max(size.Width - ContentPadding, 1f),
+            MathF.Max(size.Height - ContentPadding, 1f));
+
+        var bounds = Graph.Bounds;
+
+        if (bounds.Width <= 0f || bounds.Height <= 0f)
+        {
+            _miniScale = 1f;
+            _miniTranslation = SKPoint.Empty;
+            return;
+        }
+
+        _miniScale = MathF.Min(_content.Width / bounds.Width, _content.Height / bounds.Height);
+
+        var center = new SKPoint(
+            _content.Left + (_content.Width / 2f),
+            _content.Top + (_content.Height / 2f));
+        var boundsCenter = new SKPoint(
+            bounds.Left + (bounds.Width / 2f),
+            bounds.Top + (bounds.Height / 2f));
+
+        _miniTranslation = new SKPoint(
+            center.X - (boundsCenter.X * _miniScale),
+            center.Y - (boundsCenter.Y * _miniScale));
+    }
+
+    private SKPoint WorldToMini(float worldX, float worldY) => new(
+        (worldX * _miniScale) + _miniTranslation.X,
+        (worldY * _miniScale) + _miniTranslation.Y);
+
+    private SKPoint MiniToWorld(SKPoint mini) => new(
+        (mini.X - _miniTranslation.X) / _miniScale,
+        (mini.Y - _miniTranslation.Y) / _miniScale);
+
+    private void OnPointerPressed(PointerSample sample)
+    {
+        if (_disposed)
+            return;
+
+        _dragging = true;
+        CenterMainViewport(new SKPoint(sample.X, sample.Y));
+
+        _ = BeginDragAsync();
+    }
+
+    private async Task BeginDragAsync()
+    {
+        try
+        {
+            if (_input is not null)
+                await _input.BeginDragAsync("crosshair");
+        }
+        catch (JSException)
+        {
+        }
+    }
+
+    private void OnPointerMoved(PointerSample sample)
+    {
+        if (_disposed || !_dragging)
+            return;
+
+        CenterMainViewport(new SKPoint(sample.X, sample.Y));
+    }
+
+    private void OnPointerReleased(long pointerId)
+    {
+        _dragging = false;
+    }
+
+    private void CenterMainViewport(SKPoint miniPosition)
+    {
+        var source = SourceSizeProvider?.Invoke() ?? SKSize.Empty;
+
+        if (source.Width <= 0f || source.Height <= 0f)
+            return;
+
+        Viewport.CenterOn(MiniToWorld(miniPosition), source);
+    }
+
+    private void OnWheel(WheelSample sample)
+    {
+        var source = SourceSizeProvider?.Invoke() ?? SKSize.Empty;
+
+        if (source.Width <= 0f || source.Height <= 0f)
+            return;
+
+        var world = MiniToWorld(new SKPoint(sample.X, sample.Y));
+        Viewport.ZoomAroundWorld(world, ZoomMath.FactorFromWheel(sample.DeltaY, sample.DeltaMode, sample.CtrlKey), source);
+    }
+}

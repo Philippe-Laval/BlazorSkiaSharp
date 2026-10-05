@@ -1,0 +1,421 @@
+@page "/graph-drawing"
+@using BlazorSkiaSharp.Components
+@using BlazorSkiaSharp.Graphs
+@using SkiaSharp
+@using SkiaSharp.Views.Blazor
+@implements IAsyncDisposable
+
+<PageTitle>Graph Drawing</PageTitle>
+
+<h1>Graph Drawing example with SkiaSharp</h1>
+
+<p class="graph-hint">
+    Drag to pan, use the mouse wheel or a trackpad pinch to zoom, pinch with two fingers on
+    touch devices &mdash; or use the minimap in the bottom right corner to jump around the
+    whole graph. Keyboard: <kbd>+</kbd>/<kbd>-</kbd> zoom, <kbd>0</kbd> reset,
+    <kbd>1</kbd> fit, arrow keys pan.
+</p>
+
+<div class="graph-toolbar">
+    <div class="btn-group btn-group-sm" role="group" aria-label="Zoom and pan">
+        <button type="button" class="btn btn-outline-secondary" title="Zoom out (-)" @onclick="() => ZoomByStep(1f / ButtonZoomStep)">&#8722;</button>
+        <button type="button" class="btn btn-outline-secondary" title="Zoom in (+)" @onclick="() => ZoomByStep(ButtonZoomStep)">+</button>
+        <button type="button" class="btn btn-outline-secondary" title="Reset view (0)" @onclick="ResetView">Reset</button>
+        <button type="button" class="btn btn-outline-secondary" title="Fit graph (1)" @onclick="FitToContent">Fit</button>
+    </div>
+    <span class="graph-toolbar__readout">Zoom @_zoomPercent</span>
+    <span class="graph-toolbar__counts">@_graph.Nodes.Count nodes &#183; @_graph.Edges.Count edges</span>
+</div>
+
+<div class="graph-stage" @ref="_stage">
+    <SKCanvasView @ref="_mainCanvas"
+                  OnPaintSurface="OnPaintSurface"
+                  IgnorePixelScaling="true"
+                  role="application"
+                  aria-label="Graph viewport. Drag to pan, use the mouse wheel to zoom."
+                  style="width:100%;height:100%;display:block;touch-action:none;cursor:grab" />
+
+    <div class="graph-stage__minimap">
+        <MinimapView @ref="_minimap"
+                     Graph="_graph"
+                     Viewport="_viewport"
+                     SourceSizeProvider="GetViewportSize"
+                     Width="260"
+                     Height="170" />
+    </div>
+</div>
+
+@code {
+    /// <summary>Panning step when an arrow key is pressed, in canvas pixels.</summary>
+    private const float KeyPanStep = 48f;
+
+    /// <summary>Zoom step of the toolbar buttons and the + / - keys.</summary>
+    private const float ButtonZoomStep = 1.25f;
+
+    private readonly GraphModel _graph = GraphModel.CreateDemo();
+    private readonly GraphViewport _viewport = new();
+    private readonly GraphRenderer _renderer = new();
+    private readonly List<PointerSlot> _pointers = [];
+
+    private SKCanvasView? _mainCanvas;
+    private MinimapView? _minimap;
+    private GraphSurfaceInput? _input;
+    private ElementReference _stage;
+
+    private SKSize _viewportSize;
+    private bool _pendingInitialFit = true;
+    private bool _viewAdjusted;
+    private bool _painting;
+    private bool _disposed;
+
+    private bool _panning;
+    private bool _pinching;
+    private SKPoint _pinchStartCenter;
+    private float _pinchStartDistance;
+
+    private bool _zoomTextDirty = true;
+    private string _zoomPercent = "100%";
+
+    [Inject]
+    private IJSRuntime JS { get; set; } = default!;
+
+    protected override void OnInitialized() => _viewport.Changed += OnViewportChanged;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender)
+            return;
+
+        _input = new GraphSurfaceInput(JS, _stage);
+        _input.PointerPressed += OnPointerPressed;
+        _input.PointerMoved += OnPointerMoved;
+        _input.PointerReleased += OnPointerReleased;
+        _input.Wheel += OnWheel;
+        _input.KeyPressed += OnKeyPressed;
+
+        try
+        {
+            await _input.AttachAsync(focusable: true, stopPropagation: false);
+        }
+        catch (JSException)
+        {
+            // JavaScript is not available: the drawing stays visible but not interactive.
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        _disposed = true;
+        _viewport.Changed -= OnViewportChanged;
+
+        if (_input is not null)
+        {
+            _input.PointerPressed -= OnPointerPressed;
+            _input.PointerMoved -= OnPointerMoved;
+            _input.PointerReleased -= OnPointerReleased;
+            _input.Wheel -= OnWheel;
+            _input.KeyPressed -= OnKeyPressed;
+            await _input.DisposeAsync();
+            _input = null;
+        }
+
+        _renderer.Dispose();
+    }
+
+    // ------------------------------------------------------------------ rendering
+
+    private void OnPaintSurface(SKPaintSurfaceEventArgs e)
+    {
+        var canvas = e.Surface.Canvas;
+        var size = new SKSize(e.Info.Width, e.Info.Height);
+        var previousSize = _viewportSize;
+        var resized = size != previousSize;
+
+        _viewportSize = size;
+        _painting = true;
+
+        try
+        {
+            canvas.Clear(GraphRenderer.SurfaceColor);
+
+            if (size.Width > 0f && size.Height > 0f)
+            {
+                if (_pendingInitialFit || (resized && !_viewAdjusted))
+                {
+                    // Show the whole graph, and keep showing it while the window is
+                    // resized, until the user takes over the view.
+                    _pendingInitialFit = false;
+                    _viewport.FitTo(_graph.Bounds, size);
+                }
+                else if (resized)
+                {
+                    // Keep whatever was in the middle of the old canvas in the middle of
+                    // the new one.
+                    var center = _viewport.ScreenToWorld(CenterOf(previousSize));
+                    _viewport.CenterOn(center, size);
+                }
+
+                canvas.Save();
+                _viewport.ApplyTo(canvas);
+                _renderer.Draw(canvas, _graph, _viewport.GetVisibleWorldRect(size), _viewport.Scale);
+                canvas.Restore();
+            }
+        }
+        finally
+        {
+            _painting = false;
+        }
+
+        // The minimap needs the measured size, which Blazor did not know about yet.
+        if (resized)
+            _minimap?.Invalidate();
+
+        FlushZoomText();
+    }
+
+    /// <summary>Called whenever the user moves the view, so resizes stop re-fitting it.</summary>
+    private void MarkViewAdjusted() => _viewAdjusted = true;
+
+    private void OnViewportChanged()
+    {
+        // A repaint requested from inside a paint callback would schedule a useless frame.
+        if (!_painting)
+            _mainCanvas?.Invalidate();
+
+        _zoomTextDirty = true;
+    }
+
+    private void FlushZoomText()
+    {
+        if (!_zoomTextDirty)
+            return;
+
+        _zoomTextDirty = false;
+        _zoomPercent = $"{MathF.Round(_viewport.Scale * 100f)}%";
+        StateHasChanged();
+    }
+
+    private SKSize GetViewportSize() => _viewportSize;
+
+    // --------------------------------------------------------------- interactions
+
+    private void OnPointerPressed(PointerSample sample)
+    {
+        if (_disposed)
+            return;
+
+        MarkViewAdjusted();
+        UpsertPointer(sample.PointerId, new SKPoint(sample.X, sample.Y));
+
+        if (_pointers.Count == 1)
+        {
+            _panning = true;
+        }
+        else if (_pointers.Count == 2)
+        {
+            // Two fingers: switch from panning to pinching.
+            _panning = false;
+            _pinching = true;
+            _pinchStartCenter = Midpoint(_pointers[0].Position, _pointers[1].Position);
+            _pinchStartDistance = SKPoint.Distance(_pointers[0].Position, _pointers[1].Position);
+        }
+        else
+        {
+            // More than two fingers: ignore the extras instead of fighting over the gesture.
+            return;
+        }
+
+        _ = BeginDragAsync();
+    }
+
+    private async Task BeginDragAsync()
+    {
+        try
+        {
+            if (_input is not null)
+                await _input.BeginDragAsync();
+        }
+        catch (JSException)
+        {
+            _panning = false;
+            _pinching = false;
+        }
+    }
+
+    private void OnPointerMoved(PointerSample sample)
+    {
+        var index = IndexOfPointer(sample.PointerId);
+
+        if (index < 0)
+            return;
+
+        var previous = _pointers[index].Position;
+        var current = new SKPoint(sample.X, sample.Y);
+        _pointers[index] = new PointerSlot(sample.PointerId, current);
+
+        if (_pointers.Count == 1)
+        {
+            if (_panning)
+                _viewport.PanByScreenDelta(current.X - previous.X, current.Y - previous.Y);
+
+            return;
+        }
+
+        if (_pointers.Count != 2 || !_pinching)
+            return;
+
+        var center = Midpoint(_pointers[0].Position, _pointers[1].Position);
+        var distance = SKPoint.Distance(_pointers[0].Position, _pointers[1].Position);
+
+        // Zoom around the point of the graph currently held between the two fingers.
+        if (_pinchStartDistance > 4f && distance > 4f)
+            _viewport.ZoomAroundWorld(_viewport.ScreenToWorld(center), distance / _pinchStartDistance, _viewportSize);
+
+        // Then follow the fingers, so the content stays under them.
+        _viewport.PanByScreenDelta(center.X - _pinchStartCenter.X, center.Y - _pinchStartCenter.Y);
+
+        _pinchStartCenter = center;
+        _pinchStartDistance = distance;
+    }
+
+    private void OnPointerReleased(long pointerId)
+    {
+        RemovePointer(pointerId);
+
+        if (_pointers.Count == 1)
+        {
+            // One finger was lifted from a pinch: resume panning with the remaining one.
+            _panning = true;
+            _pinching = false;
+        }
+        else if (_pointers.Count == 0)
+        {
+            _panning = false;
+            _pinching = false;
+        }
+    }
+
+    private void OnWheel(WheelSample sample)
+    {
+        MarkViewAdjusted();
+
+        _viewport.ZoomAt(
+            new SKPoint(sample.X, sample.Y),
+            ZoomMath.FactorFromWheel(sample.DeltaY, sample.DeltaMode, sample.CtrlKey));
+
+        FlushZoomText();
+    }
+
+    private void OnKeyPressed(string key)
+    {
+        switch (key)
+        {
+            case "+":
+            case "=":
+                ZoomByStep(ButtonZoomStep);
+                break;
+            case "-":
+            case "_":
+                ZoomByStep(1f / ButtonZoomStep);
+                break;
+            case "0":
+                ResetView();
+                break;
+            case "1":
+                FitToContent();
+                break;
+            case "ArrowLeft":
+                PanByKey(KeyPanStep, 0f);
+                break;
+            case "ArrowRight":
+                PanByKey(-KeyPanStep, 0f);
+                break;
+            case "ArrowUp":
+                PanByKey(0f, KeyPanStep);
+                break;
+            case "ArrowDown":
+                PanByKey(0f, -KeyPanStep);
+                break;
+        }
+    }
+
+    private void PanByKey(float dx, float dy)
+    {
+        if (_viewportSize.Width <= 0f)
+            return;
+
+        MarkViewAdjusted();
+        _viewport.PanByScreenDelta(dx, dy);
+        FlushZoomText();
+    }
+
+    private void ZoomByStep(float factor)
+    {
+        if (_viewportSize.Width <= 0f || _viewportSize.Height <= 0f)
+            return;
+
+        MarkViewAdjusted();
+        _viewport.ZoomAt(CenterOf(_viewportSize), factor);
+        FlushZoomText();
+    }
+
+    private void ResetView()
+    {
+        if (_viewportSize.Width <= 0f)
+            return;
+
+        MarkViewAdjusted();
+        _viewport.Reset(_viewportSize);
+        FlushZoomText();
+    }
+
+    private void FitToContent()
+    {
+        if (_viewportSize.Width <= 0f)
+            return;
+
+        MarkViewAdjusted();
+        _viewport.FitTo(_graph.Bounds, _viewportSize);
+        FlushZoomText();
+    }
+
+    // -------------------------------------------------------------------- helpers
+
+    private void UpsertPointer(long pointerId, SKPoint position)
+    {
+        var index = IndexOfPointer(pointerId);
+
+        if (index >= 0)
+            _pointers[index] = new PointerSlot(pointerId, position);
+        else
+            _pointers.Add(new PointerSlot(pointerId, position));
+    }
+
+    private int IndexOfPointer(long pointerId)
+    {
+        for (var i = 0; i < _pointers.Count; i++)
+        {
+            if (_pointers[i].Id == pointerId)
+                return i;
+        }
+
+        return -1;
+    }
+
+    private bool RemovePointer(long pointerId)
+    {
+        var index = IndexOfPointer(pointerId);
+
+        if (index < 0)
+            return false;
+
+        _pointers.RemoveAt(index);
+        return true;
+    }
+
+    private static SKPoint CenterOf(SKSize size) => new(size.Width / 2f, size.Height / 2f);
+
+    private static SKPoint Midpoint(SKPoint a, SKPoint b) => new((a.X + b.X) / 2f, (a.Y + b.Y) / 2f);
+
+    private readonly record struct PointerSlot(long Id, SKPoint Position);
+}

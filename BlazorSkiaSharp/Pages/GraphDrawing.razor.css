@@ -1,0 +1,53 @@
+.graph-hint {
+    font-size: 0.875rem;
+    color: #5a6272;
+    margin-bottom: 0.75rem;
+}
+
+.graph-hint kbd {
+    background-color: #eef1f6;
+    border: 1px solid #d5dbe6;
+    border-bottom-width: 2px;
+    border-radius: 3px;
+    color: #3c4453;
+    font-size: 0.8125rem;
+    padding: 0.05rem 0.3rem;
+}
+
+.graph-toolbar {
+    align-items: center;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    margin-bottom: 0.5rem;
+}
+
+.graph-toolbar__readout {
+    color: #3c4453;
+    font-size: 0.875rem;
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+    min-width: 4.5rem;
+}
+
+.graph-toolbar__nodes {
+    color: #6b7383;
+    font-size: 0.8125rem;
+}
+
+.graph-stage {
+    background-color: #f8f9fb;
+    border: 1px solid #dfe4ec;
+    border-radius: 6px;
+    height: min(72vh, 660px);
+    min-height: 340px;
+    overflow: hidden;
+    position: relative;
+    width: 100%;
+}
+
+.graph-stage__minimap {
+    bottom: 12px;
+    position: absolute;
+    right: 12px;
+}

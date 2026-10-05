@@ -1,0 +1,8 @@
+.graph-minimap {
+    border-radius: 8px;
+    overflow: hidden;
+    line-height: 0;
+    box-shadow: 0 6px 20px rgba(15, 23, 42, 0.45);
+    outline: 1px solid rgba(15, 23, 42, 0.55);
+    outline-offset: -1px;
+}

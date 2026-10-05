@@ -1,0 +1,51 @@
+﻿@page "/native-dependency-example"
+<PageTitle>Native dependency</PageTitle>
+
+<h1>Native dependency example with SkiaSharp</h1>
+
+<SKCanvasView OnPaintSurface="OnPaintSurface"
+              IgnorePixelScaling="true" />
+
+<h2>Drawing</h2>
+
+<SKCanvasView OnPaintSurface="OnPaintSurface2" />
+
+@code {
+    private void OnPaintSurface(SKPaintSurfaceEventArgs e)
+    {
+        var canvas = e.Surface.Canvas;
+        canvas.Clear(SKColors.White);
+
+        using var paint = new SKPaint
+        {
+            Color = SKColors.CornflowerBlue,
+            IsAntialias = true,
+        };
+
+        canvas.DrawCircle(
+            e.Info.Width / 2f,
+            e.Info.Height / 2f,
+            Math.Min(e.Info.Width, e.Info.Height) * 0.3f,
+            paint);
+    }
+
+    private void OnPaintSurface2(SKPaintSurfaceEventArgs e)
+    {
+        var canvas = e.Surface.Canvas;
+
+        canvas.Clear(SKColors.White);
+
+        using var paint = new SKPaint
+        {
+            Color = SKColors.Black,
+            IsAntialias = true,
+        };
+
+        SKFont font = new SKFont(SKTypeface.Default, 24);
+        SKTextBlob? textBlob = SKTextBlob.Create("SkiaSharp", font);
+        if (textBlob != null)
+        {
+            canvas.DrawText(textBlob, 0, 24, paint);
+        }
+    }
+}
