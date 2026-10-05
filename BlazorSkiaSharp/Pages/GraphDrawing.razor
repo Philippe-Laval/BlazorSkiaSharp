@@ -36,10 +36,8 @@
                   style="width:100%;height:100%;display:block;touch-action:none;cursor:grab" />
 
     <div class="graph-stage__minimap">
-        <MinimapView @ref="_minimap"
-                     Graph="_graph"
+        <MinimapView Graph="_graph"
                      Viewport="_viewport"
-                     SourceSizeProvider="GetViewportSize"
                      Width="260"
                      Height="170" />
     </div>
@@ -58,11 +56,9 @@
     private readonly List<PointerSlot> _pointers = [];
 
     private SKCanvasView? _mainCanvas;
-    private MinimapView? _minimap;
     private GraphSurfaceInput? _input;
     private ElementReference _stage;
 
-    private SKSize _viewportSize;
     private bool _pendingInitialFit = true;
     private bool _viewAdjusted;
     private bool _painting;
@@ -128,36 +124,35 @@
     {
         var canvas = e.Surface.Canvas;
         var size = new SKSize(e.Info.Width, e.Info.Height);
-        var previousSize = _viewportSize;
-        var resized = size != previousSize;
+        var resized = size != _viewport.SurfaceSize;
 
-        _viewportSize = size;
         _painting = true;
 
         try
         {
+            // Hand the viewport the measured size. On a resize it keeps the world point
+            // that was in the middle of the canvas in the middle. This also repaints the
+            // minimap, which needs the same numbers to draw its viewport frame.
+            if (resized && _viewport.HasSurface)
+                _viewport.ResizeSurface(size);
+            else
+                _viewport.AttachSurface(size);
+
             canvas.Clear(GraphRenderer.SurfaceColor);
 
-            if (size.Width > 0f && size.Height > 0f)
+            if (_viewport.HasSurface)
             {
                 if (_pendingInitialFit || (resized && !_viewAdjusted))
                 {
                     // Show the whole graph, and keep showing it while the window is
                     // resized, until the user takes over the view.
                     _pendingInitialFit = false;
-                    _viewport.FitTo(_graph.Bounds, size);
-                }
-                else if (resized)
-                {
-                    // Keep whatever was in the middle of the old canvas in the middle of
-                    // the new one.
-                    var center = _viewport.ScreenToWorld(CenterOf(previousSize));
-                    _viewport.CenterOn(center, size);
+                    _viewport.FitTo(_graph.Bounds);
                 }
 
                 canvas.Save();
                 _viewport.ApplyTo(canvas);
-                _renderer.Draw(canvas, _graph, _viewport.GetVisibleWorldRect(size), _viewport.Scale);
+                _renderer.Draw(canvas, _graph, _viewport.GetVisibleWorldRect(), _viewport.Scale);
                 canvas.Restore();
             }
         }
@@ -165,10 +160,6 @@
         {
             _painting = false;
         }
-
-        // The minimap needs the measured size, which Blazor did not know about yet.
-        if (resized)
-            _minimap?.Invalidate();
 
         FlushZoomText();
     }
@@ -194,8 +185,6 @@
         _zoomPercent = $"{MathF.Round(_viewport.Scale * 100f)}%";
         StateHasChanged();
     }
-
-    private SKSize GetViewportSize() => _viewportSize;
 
     // --------------------------------------------------------------- interactions
 
@@ -269,7 +258,7 @@
 
         // Zoom around the point of the graph currently held between the two fingers.
         if (_pinchStartDistance > 4f && distance > 4f)
-            _viewport.ZoomAroundWorld(_viewport.ScreenToWorld(center), distance / _pinchStartDistance, _viewportSize);
+            _viewport.ZoomAroundWorld(_viewport.ScreenToWorld(center), distance / _pinchStartDistance);
 
         // Then follow the fingers, so the content stays under them.
         _viewport.PanByScreenDelta(center.X - _pinchStartCenter.X, center.Y - _pinchStartCenter.Y);
@@ -341,7 +330,7 @@
 
     private void PanByKey(float dx, float dy)
     {
-        if (_viewportSize.Width <= 0f)
+        if (!_viewport.HasSurface)
             return;
 
         MarkViewAdjusted();
@@ -351,31 +340,31 @@
 
     private void ZoomByStep(float factor)
     {
-        if (_viewportSize.Width <= 0f || _viewportSize.Height <= 0f)
+        if (!_viewport.HasSurface)
             return;
 
         MarkViewAdjusted();
-        _viewport.ZoomAt(CenterOf(_viewportSize), factor);
+        _viewport.ZoomAt(_viewport.SurfaceCenter, factor);
         FlushZoomText();
     }
 
     private void ResetView()
     {
-        if (_viewportSize.Width <= 0f)
+        if (!_viewport.HasSurface)
             return;
 
         MarkViewAdjusted();
-        _viewport.Reset(_viewportSize);
+        _viewport.Reset();
         FlushZoomText();
     }
 
     private void FitToContent()
     {
-        if (_viewportSize.Width <= 0f)
+        if (!_viewport.HasSurface)
             return;
 
         MarkViewAdjusted();
-        _viewport.FitTo(_graph.Bounds, _viewportSize);
+        _viewport.FitTo(_graph.Bounds);
         FlushZoomText();
     }
 
@@ -412,8 +401,6 @@
         _pointers.RemoveAt(index);
         return true;
     }
-
-    private static SKPoint CenterOf(SKSize size) => new(size.Width / 2f, size.Height / 2f);
 
     private static SKPoint Midpoint(SKPoint a, SKPoint b) => new((a.X + b.X) / 2f, (a.Y + b.Y) / 2f);
 

@@ -43,13 +43,7 @@
     [Parameter, EditorRequired]
     public GraphViewport Viewport { get; set; } = default!;
 
-    /// <summary>
-    /// Size in pixels of the main canvas. Passed as a delegate because it is only known
-    /// once the canvas has been painted, and reading it must not require a re-render.
-    /// </summary>
-    [Parameter]
-    public Func<SKSize>? SourceSizeProvider { get; set; }
-
+    /// <summary>Width of the minimap, in CSS pixels.</summary>
     [Parameter]
     public int Width { get; set; } = 260;
 
@@ -120,9 +114,6 @@
 
     private void OnViewportChanged() => _canvas?.Invalidate();
 
-    /// <summary>Requests a repaint, for example when the main canvas has been resized.</summary>
-    public void Invalidate() => _canvas?.Invalidate();
-
     private void OnPaintSurface(SKPaintSurfaceEventArgs e)
     {
         var canvas = e.Surface.Canvas;
@@ -180,12 +171,10 @@
 
     private void DrawViewportOverlay(SKCanvas canvas)
     {
-        var source = SourceSizeProvider?.Invoke() ?? SKSize.Empty;
-
-        if (source.Width <= 0f || source.Height <= 0f)
+        if (!Viewport.HasSurface)
             return;
 
-        var visible = Viewport.GetVisibleWorldRect(source);
+        var visible = Viewport.GetVisibleWorldRect();
         var topLeft = WorldToMini(visible.Left, visible.Top);
         var bottomRight = WorldToMini(visible.Right, visible.Bottom);
         var frame = new SKRect(topLeft.X, topLeft.Y, bottomRight.X, bottomRight.Y);
@@ -280,22 +269,18 @@
 
     private void CenterMainViewport(SKPoint miniPosition)
     {
-        var source = SourceSizeProvider?.Invoke() ?? SKSize.Empty;
-
-        if (source.Width <= 0f || source.Height <= 0f)
+        if (!Viewport.HasSurface)
             return;
 
-        Viewport.CenterOn(MiniToWorld(miniPosition), source);
+        Viewport.CenterOn(MiniToWorld(miniPosition));
     }
 
     private void OnWheel(WheelSample sample)
     {
-        var source = SourceSizeProvider?.Invoke() ?? SKSize.Empty;
-
-        if (source.Width <= 0f || source.Height <= 0f)
+        if (!Viewport.HasSurface)
             return;
 
         var world = MiniToWorld(new SKPoint(sample.X, sample.Y));
-        Viewport.ZoomAroundWorld(world, ZoomMath.FactorFromWheel(sample.DeltaY, sample.DeltaMode, sample.CtrlKey), source);
+        Viewport.ZoomAroundWorld(world, ZoomMath.FactorFromWheel(sample.DeltaY, sample.DeltaMode, sample.CtrlKey));
     }
 }

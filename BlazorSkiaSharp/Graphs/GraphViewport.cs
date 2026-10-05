@@ -18,6 +18,21 @@ public sealed class GraphViewport
     private float scale = 1f;
     private SKPoint translation = SKPoint.Empty;
 
+    /// <summary>Size in canvas pixels of the surface this viewport is mapped to.</summary>
+    /// <remarks>
+    /// The viewport is told about its surface once, when the surface is first measured,
+    /// and the size is updated on resize. Anything that has to convert between screen
+    /// and world coordinates reads this instead of being handed a size of its own, which
+    /// is what lets the minimap share the very same viewport without extra plumbing.
+    /// </remarks>
+    public SKSize SurfaceSize { get; private set; }
+
+    /// <summary>Whether a valid surface size has been supplied yet.</summary>
+    public bool HasSurface => SurfaceSize.Width > 0f && SurfaceSize.Height > 0f;
+
+    /// <summary>Centre of <see cref="SurfaceSize"/>.</summary>
+    public SKPoint SurfaceCenter => new(SurfaceSize.Width / 2f, SurfaceSize.Height / 2f);
+
     /// <summary>Raised whenever the transform changed and both surfaces should repaint.</summary>
     public event Action? Changed;
 
@@ -26,6 +41,40 @@ public sealed class GraphViewport
 
     /// <summary>Screen space offset, in canvas pixels, applied after scaling.</summary>
     public SKPoint Translation => translation;
+
+    /// <summary>
+    /// Records the measured size of the surface this viewport drives. Used on the first
+    /// paint, when there is no previous surface to preserve anything about.
+    /// </summary>
+    public void AttachSurface(SKSize size) => SetSurfaceSize(size);
+
+    /// <summary>
+    /// Records a new size for the surface after a resize, keeping the world point that
+    /// was in the middle of the old canvas in the middle of the new one.
+    /// </summary>
+    public void ResizeSurface(SKSize size)
+    {
+        if (!HasSurface)
+        {
+            AttachSurface(size);
+            return;
+        }
+
+        var center = ScreenToWorld(SurfaceCenter);
+
+        SetSurfaceSize(size);
+        CenterOn(center);
+    }
+
+    private void SetSurfaceSize(SKSize size)
+    {
+        // Only a real change is worth a repaint; every paint of the same size calls this.
+        if (SurfaceSize == size)
+            return;
+
+        SurfaceSize = size;
+        NotifyChanged();
+    }
 
     /// <summary>Maps a point from world (graph) coordinates to canvas pixels.</summary>
     public SKPoint WorldToScreen(SKPoint world) => new(
@@ -51,11 +100,11 @@ public sealed class GraphViewport
         canvas.Scale(scale);
     }
 
-    /// <summary>World rectangle currently covered by a surface of the given pixel size.</summary>
-    public SKRect GetVisibleWorldRect(SKSize surfaceSize)
+    /// <summary>World rectangle currently covered by <see cref="SurfaceSize"/>.</summary>
+    public SKRect GetVisibleWorldRect()
     {
         var topLeft = ScreenToWorld(SKPoint.Empty);
-        var bottomRight = ScreenToWorld(new SKPoint(surfaceSize.Width, surfaceSize.Height));
+        var bottomRight = ScreenToWorld(new SKPoint(SurfaceSize.Width, SurfaceSize.Height));
 
         return new SKRect(topLeft.X, topLeft.Y, bottomRight.X, bottomRight.Y);
     }
@@ -88,12 +137,15 @@ public sealed class GraphViewport
     /// outside the surface it is first pulled back to the closest visible point, which is
     /// what the minimap needs when the wheel is used far from the centre.
     /// </summary>
-    public void ZoomAroundWorld(SKPoint worldAnchor, float factor, SKSize surfaceSize)
+    public void ZoomAroundWorld(SKPoint worldAnchor, float factor)
     {
+        if (!HasSurface)
+            return;
+
         var anchor = WorldToScreen(worldAnchor);
         ZoomAt(new SKPoint(
-            Math.Clamp(anchor.X, 0f, surfaceSize.Width),
-            Math.Clamp(anchor.Y, 0f, surfaceSize.Height)), factor);
+            Math.Clamp(anchor.X, 0f, SurfaceSize.Width),
+            Math.Clamp(anchor.Y, 0f, SurfaceSize.Height)), factor);
     }
 
     /// <summary>Scrolls the content by a canvas pixel delta.</summary>
@@ -107,26 +159,27 @@ public sealed class GraphViewport
     }
 
     /// <summary>Moves the transform so that <paramref name="worldCenter"/> sits at the surface centre.</summary>
-    public void CenterOn(SKPoint worldCenter, SKSize surfaceSize)
+    public void CenterOn(SKPoint worldCenter)
     {
+        var center = SurfaceCenter;
         translation = new SKPoint(
-            (surfaceSize.Width / 2f) - (worldCenter.X * scale),
-            (surfaceSize.Height / 2f) - (worldCenter.Y * scale));
+            center.X - (worldCenter.X * scale),
+            center.Y - (worldCenter.Y * scale));
 
         NotifyChanged();
     }
 
     /// <summary>Scales and translates so that <paramref name="worldBounds"/> fills the surface.</summary>
-    public void FitTo(SKRect worldBounds, SKSize surfaceSize, float paddingRatio = 0.08f)
+    public void FitTo(SKRect worldBounds, float paddingRatio = 0.08f)
     {
-        if (surfaceSize.Width <= 0f || surfaceSize.Height <= 0f)
+        if (!HasSurface)
             return;
 
         paddingRatio = Math.Clamp(paddingRatio, 0f, 0.45f);
 
         // The graph is centred on the surface, so the padding shrinks it on both sides.
-        var availableWidth = surfaceSize.Width * (1f - (2f * paddingRatio));
-        var availableHeight = surfaceSize.Height * (1f - (2f * paddingRatio));
+        var availableWidth = SurfaceSize.Width * (1f - (2f * paddingRatio));
+        var availableHeight = SurfaceSize.Height * (1f - (2f * paddingRatio));
 
         var sx = worldBounds.Width > 0f ? availableWidth / worldBounds.Width : 1f;
         var sy = worldBounds.Height > 0f ? availableHeight / worldBounds.Height : 1f;
@@ -136,16 +189,16 @@ public sealed class GraphViewport
             fit = 1f;
 
         scale = Math.Clamp(fit, MinScale, MaxScale);
-        CenterOn(
-            new SKPoint(worldBounds.Left + (worldBounds.Width / 2f), worldBounds.Top + (worldBounds.Height / 2f)),
-            surfaceSize);
+        CenterOn(new SKPoint(
+            worldBounds.Left + (worldBounds.Width / 2f),
+            worldBounds.Top + (worldBounds.Height / 2f)));
     }
 
     /// <summary>Restores 1:1 scale with the world origin in the middle of the surface.</summary>
-    public void Reset(SKSize surfaceSize)
+    public void Reset()
     {
         scale = 1f;
-        CenterOn(SKPoint.Empty, surfaceSize);
+        CenterOn(SKPoint.Empty);
     }
 
     private void NotifyChanged() => Changed?.Invoke();
